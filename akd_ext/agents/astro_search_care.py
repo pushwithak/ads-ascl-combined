@@ -386,9 +386,10 @@ class AstroSearchConfig(OpenAIBaseAgentConfig):
     """Configuration for Astro Data Search Agent."""
 
     description: str = Field(
-        default="""Astrophysics dataset discovery agent for finding astronomical data across NASA archives
-        (MAST, HEASARC, IRSA) via Astroquery and ADS. Supports object-based, coordinate-based,
-        literature-driven, and event-driven search patterns for researchers at all experience levels.
+        default="""Astrophysics dataset and software discovery agent for finding astronomical data across
+        NASA archives (MAST, HEASARC, IRSA) via Astroquery and ADS, and astronomy codes via the
+        Astrophysics Source Code Library (ASCL). Supports object-based, coordinate-based, literature-driven,
+        code-driven, and event-driven search patterns for researchers at all experience levels.
         Outputs are delivered via a structured schema and interactive chat with the user for clarification,
         guidance, approval gates, or status updates."""
     )

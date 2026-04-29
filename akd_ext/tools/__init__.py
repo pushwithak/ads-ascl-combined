@@ -30,6 +30,13 @@ from .ads import (
     ADSSearchToolOutputSchema,
     ADSToolConfig,
 )
+from .ascl import (
+    ASCLEntry,
+    ASCLSearchTool,
+    ASCLSearchToolConfig,
+    ASCLSearchToolInputSchema,
+    ASCLSearchToolOutputSchema,
+)
 
 __all__ = [
     "DummyTool",
@@ -56,4 +63,9 @@ __all__ = [
     "ADSLinksResolverTool",
     "ADSLinksResolverInputSchema",
     "ADSLinksResolverOutputSchema",
+    "ASCLEntry",
+    "ASCLSearchTool",
+    "ASCLSearchToolConfig",
+    "ASCLSearchToolInputSchema",
+    "ASCLSearchToolOutputSchema",
 ]
