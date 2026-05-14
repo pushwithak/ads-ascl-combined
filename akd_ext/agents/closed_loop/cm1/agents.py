@@ -20,6 +20,7 @@ from pydantic import Field
 
 from akd_ext.agents.closed_loop.cm1.prompts import (
     CAPABILITY_FEASIBILITY_MAPPER_SYSTEM_PROMPT,
+    DATA_ANALYSIS_SYSTEM_PROMPT,
     EXPERIMENT_IMPLEMENTER_SYSTEM_PROMPT,
     INTERPRETATION_PAPER_ASSEMBLY_SYSTEM_PROMPT,
     RESEARCH_REPORT_GENERATOR_SYSTEM_PROMPT,
@@ -29,6 +30,10 @@ from akd_ext.agents.closed_loop.cm1.tools import get_default_impl_tools, get_def
 from akd_ext.agents.closed_loop.stages.capability_feasibility_mapper import (
     CapabilityFeasibilityMapperAgent,
     CapabilityFeasibilityMapperConfig,
+)
+from akd_ext.agents.closed_loop.stages.experiment_analysis import (
+    ExperimentAnalysisAgent,
+    ExperimentAnalysisConfig,
 )
 from akd_ext.agents.closed_loop.stages.experiment_implementation import (
     ExperimentImplementationAgent,
@@ -167,24 +172,48 @@ class CM1ResearchReportGeneratorAgent(ResearchReportGeneratorAgent):
 
 
 # -----------------------------------------------------------------------------
-# Stage 5 (alt): Interpretation & Paper Assembly
+# Stage 6: Interpretation & Paper Assembly
 # -----------------------------------------------------------------------------
 
 
 class CM1InterpretationPaperAssemblyConfig(InterpretationPaperAssemblyConfig):
-    """CM1-specific configuration for Interpretation & Paper Assembly."""
+    """CM1-specific configuration for Stage-6 Paper Assembly."""
 
     system_prompt: str = Field(default=INTERPRETATION_PAPER_ASSEMBLY_SYSTEM_PROMPT)
     description: str = Field(
-        default="Stage-5 interpretation and paper assembly agent that transforms CM1 atmospheric model "
-        "experiment outputs into structured scientific analysis artifacts including YAML manifests, "
-        "executable Jupyter analysis notebooks, and publication-style Markdown reports with matplotlib figures. "
-        "May also produce free-form text responses to chat with the user for clarification, approval gates, "
-        "or status updates."
+        default="Stage-6 paper assembly agent for CM1 experiments. Takes Stage-1 hypothesis, "
+        "Stage-3 experiment design, Stage-4 implementation report, and Stage-5 figure analysis, "
+        "then produces a publication-style scientific report in Markdown with Abstract, Introduction, "
+        "Methodology, Results, Discussion, and Conclusion sections."
     )
 
 
 class CM1InterpretationPaperAssemblyAgent(InterpretationPaperAssemblyAgent):
-    """CM1-specialized Interpretation & Paper Assembly Agent."""
+    """CM1-specialized Stage-6 Paper Assembly Agent."""
 
     config_schema = CM1InterpretationPaperAssemblyConfig
+
+
+# -----------------------------------------------------------------------------
+# Stage 5: Experiment Analysis Agent
+# -----------------------------------------------------------------------------
+
+
+class CM1ExperimentAnalysisConfig(ExperimentAnalysisConfig):
+    """CM1-specific configuration for the Stage-5 Experiment Analysis Agent."""
+
+    system_prompt: str = Field(default=DATA_ANALYSIS_SYSTEM_PROMPT)
+    description: str = Field(
+        default="Stage-5: INTERNAL ONLY — Do NOT select this agent in planner workflows. "
+        "Stage-5 Experiment Analysis Agent for CM1 experiments. Polls job_status deterministically; "
+        "if the job is still running or has failed, returns a free-form status message. When "
+        "complete, fetches every figure URL via job_plot, delegates to ImageAnalyzerAgent for "
+        "vision-based figure analysis, and returns a structured markdown report. The downstream "
+        "Stage-6 paper generator consumes this report."
+    )
+
+
+class CM1ExperimentAnalysisAgent(ExperimentAnalysisAgent):
+    """CM1-specialized Stage-5 Experiment Analysis Agent."""
+
+    config_schema = CM1ExperimentAnalysisConfig
