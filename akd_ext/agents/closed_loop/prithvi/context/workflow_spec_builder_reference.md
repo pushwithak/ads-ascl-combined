@@ -119,7 +119,7 @@ rq:
 # Option A: catalog events
 events:
   source: flood_catalog  # or burn_catalog
-  catalog_path: /rhome/vkolluru/AKD/CLSW_new/event_database/flood_events_catalog.csv
+  # catalog_path: injected by orchestrator's patch_config() at runtime
   filters:
     event_ids: [NOAA_EP_183571]  # specific IDs
     # OR filter by attributes:
@@ -158,10 +158,8 @@ prithvi:
   burn: false       # set true if burn events exist
   flood: true       # set true if flood events exist
   crop: true        # always true for crop-damage RQs
-  flood_checkpoint: /rhome/vkolluru/r2o/r2o_flood/Prithvi-EO-2.0-300M-TL-Sen1Floods11/Prithvi-EO-V2-600-Sen1Floods11.pt
-  crop_checkpoint: /rhome/vkolluru/r2o/r2o_crop/scripts/best-epoch=117_ep120.ckpt
-  # burn_checkpoint: /rhome/rshinde/r2o/burnscars/burn_scar_v2/ckpt/mr01eo-workshop.ckpt
-  # burn_config: /rhome/rshinde/r2o/burnscars/burn_scar_v2/configs/config.yaml
+  # NOTE: checkpoint paths are injected by the HPC orchestrator at runtime.
+  # Stage 3 only sets the boolean flags above.
 
 # ─── BASELINES (auto-selected by region, these are triggers) ───
 baselines:
@@ -197,22 +195,18 @@ analysis:
   # Note: n ≥ 5 events needed for Wilcoxon, n ≥ 3 for t-test
   # With n < 5, descriptive statistics are reported instead
 
-# ─── GFM CREDENTIALS (required for flood events) ───
+# ─── GFM SETTINGS (flood events only) ───
 gfm:
-  jrc_email: "user@email.com"
-  jrc_password: "password"
   date_range_days: 5   # search window around flood date
+  # NOTE: JRC credentials are resolved from env vars on HPC at runtime.
 
-# ─── PATHS ───
-paths:
-  download_script: /rhome/vkolluru/AKD/CLSW_new/scripts/download_all_datasets.py
-  statistical_tests: /rhome/vkolluru/AKD/CLSW_new/statistical_tests
-  prithvi_modules: /rhome/vkolluru/AKD/CLSW_new/prithvi
-  flood_validation: /rhome/vkolluru/AKD/CLSW_new/scripts/flood_validation_v26.py
+# NOTE: No "paths" section — server paths (download_script, statistical_tests,
+# prithvi_modules, flood_validation) and checkpoint paths are injected by the
+# HPC orchestrator's patch_config() at runtime. Stage 3 does not generate them.
 
 # ─── OUTPUT ───
 output:
-  dir: /rhome/vkolluru/AKD/CLSW_new/output/rq{N}_{descriptor}
+  dir: output/rq{N}_{descriptor}  # relative — orchestrator resolves full path
   maps: true
   figures: true
   tables: true
@@ -227,8 +221,9 @@ output:
 4. **US-only datasets auto-skipped** for non-US events by the executor
 5. **Baselines auto-selected by region** — config just needs the trigger name
 6. **GFM section required** if any flood events exist
-7. **burn_checkpoint required** if `prithvi.burn: true`
+7. **Do NOT include server paths, checkpoint paths, or credentials** — injected by HPC orchestrator at runtime
 8. **At least 5 events recommended** for statistical tests; 2 events = descriptive only
+9. **Config contains scientific intent only**: rq, events, prithvi flags, baselines, datasets, analysis, gfm settings, output
 
 ---
 

@@ -197,18 +197,19 @@ Key note: **n ≥ 5 events** needed for Wilcoxon signed-rank. With n < 5, the ex
 
 ---
 
-## 9. Server Paths
+## 9. Server-Side Resources
 
-| Tool | Path |
+All server paths (scripts, checkpoints, catalogs, output directories) are
+injected by the HPC orchestrator's `patch_config()` at runtime. The config
+YAML produced by Stage 3 contains **no absolute paths** — only scientific
+intent. The orchestrator resolves:
+
+| Resource | Injected By |
 |---|---|
-| Pipeline executor | `/rhome/vkolluru/AKD/CLSW_new/prithvi/pipeline_executor.py` |
-| Prithvi modules | `/rhome/vkolluru/AKD/CLSW_new/prithvi/` |
-| Download script | `/rhome/vkolluru/AKD/CLSW_new/scripts/download_all_datasets.py` |
-| Flood validation | `/rhome/vkolluru/AKD/CLSW_new/scripts/flood_validation_v26.py` |
-| Crop date screening | `/rhome/vkolluru/AKD/CLSW_new/scripts/screen_crop_dates.py` |
-| Event database | `/rhome/vkolluru/AKD/CLSW_new/event_database/` |
-| Flood catalog | `flood_events_catalog.csv` (100 episodes) |
-| Burn catalog | `burn_events_catalog.csv` (100 events) |
-| Statistical tests | `/rhome/vkolluru/AKD/CLSW_new/statistical_tests/` |
-| Configs | `/rhome/vkolluru/AKD/CLSW_new/configs/` |
-| Output | `/rhome/vkolluru/AKD/CLSW_new/output/` |
+| Pipeline executor, download script, flood validation | `paths` section via `PATHS_DEFAULTS` |
+| Prithvi checkpoints (flood, crop, burn) | `prithvi` section via `CHECKPOINT_DEFAULTS` |
+| Flood / burn event catalogs | `events.screening.catalog_path` via `CATALOG_PATHS` |
+| GFM / JRC credentials | `gfm` section via env vars `GFM_JRC_EMAIL`, `GFM_JRC_PASSWORD` |
+| Output directory | Provided in config by Stage 3 as a relative descriptor (e.g. `output/rq2_flood_crop_severity`) |
+
+See `orchestrator.py` for the canonical path definitions.

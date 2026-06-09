@@ -66,8 +66,11 @@ events:
     # catalog mode — re-verify existing catalog events:
     catalog_path: "<path to CSV>"
     event_ids: [<id1>, <id2>]             # optional: specific IDs to screen
-    # manual mode — user provides bbox interactively during Phase 0
-    # (no additional fields needed — screen_events.py prompts user)
+    # manual mode — bbox, flood_date, event_id stored here;
+    # orchestrator passes them as CLI args to screen_events.py
+    # bbox: [<west>, <south>, <east>, <north>]   # EPSG:4326
+    # flood_date: "<YYYY-MM-DD>"
+    # event_id: "<unique_id>"                     # e.g. MANUAL_2024-06-24
   max_events: <number>                    # Phase 0 screens this many, user selects top N
   custom_events: []                       # Phase 0 fills this after screening
   # After Phase 0 runs, source changes to "custom" and custom_events is populated
@@ -77,10 +80,8 @@ prithvi:
   burn: true | false
   flood: true | false
   crop: true | false                      # almost always true for crop-damage RQs
-  flood_checkpoint: /rhome/vkolluru/r2o/r2o_flood/Prithvi-EO-2.0-300M-TL-Sen1Floods11/Prithvi-EO-V2-600-Sen1Floods11.pt
-  crop_checkpoint: /rhome/vkolluru/r2o/r2o_crop/scripts/best-epoch=117_ep120.ckpt
-  burn_checkpoint: /rhome/rshinde/r2o/burnscars/burn_scar_v2/ckpt/mr01eo-workshop.ckpt
-  burn_config: /rhome/rshinde/r2o/burnscars/burn_scar_v2/ckpt/mr01eo_config.yaml
+  # NOTE: checkpoint paths are NOT included here — they are injected by the
+  # HPC orchestrator at runtime via patch_config(). Stage 3 only sets flags.
 
 # ─── BASELINES (region-aware, auto-selected by executor) ───
 baselines:
@@ -128,22 +129,19 @@ analysis:
   paired: true | false
   # Note: n ≥ 5 events needed for Wilcoxon; n < 5 → descriptive stats only
 
-# ─── GFM CREDENTIALS (required if any flood events exist) ───
+# ─── GFM SETTINGS (flood events only) ───
 gfm:
-  jrc_email: "<user_email>"
-  jrc_password: "<password>"
   date_range_days: 5                      # search window around flood date
+  # NOTE: JRC credentials and all server paths are injected by the HPC
+  # orchestrator at runtime — do NOT include them in this config.
 
-# ─── SERVER PATHS (fixed) ───
-paths:
-  download_script: /rhome/vkolluru/AKD/CLSW_new/scripts/download_all_datasets.py
-  statistical_tests: /rhome/vkolluru/AKD/CLSW_new/statistical_tests
-  prithvi_modules: /rhome/vkolluru/AKD/CLSW_new/prithvi
-  flood_validation: /rhome/vkolluru/AKD/CLSW_new/scripts/flood_validation_v26.py
+# NOTE: No "paths" section here. Server paths (download_script,
+# statistical_tests, prithvi_modules, flood_validation) are injected
+# by the HPC orchestrator's patch_config() at runtime.
 
 # ─── OUTPUT ───
 output:
-  dir: /rhome/vkolluru/AKD/CLSW_new/output/<rq_short_name>
+  dir: output/rq{N}_{descriptor}  # relative — orchestrator resolves full path
   maps: true
   figures: true
   tables: true
@@ -161,9 +159,8 @@ output:
 
 ### 2. Events Section
 - **source:** "flood_catalog" if flood RQ; "burn_catalog" if burn RQ; "custom" if user provides events or RQ scope doesn't match catalogs
-- **catalog_path:** Use exact server paths:
-  - Floods: `/rhome/vkolluru/AKD/CLSW_new/event_database/flood_events_catalog.csv`
-  - Burns: `/rhome/vkolluru/AKD/CLSW_new/event_database/burn_events_catalog.csv`
+- **catalog_path:** Do NOT hardcode — the orchestrator's `patch_config()` injects
+  the correct catalog path from `CATALOG_PATHS` based on hazard type (flood/burn)
 - **filters:** Derive from RQ constraints (state, cropland%, year range)
 - **max_events:** ≥5 for statistical tests; 2-4 for initial testing; 10+ for production
 - **custom_events:** Each event requires:
@@ -179,8 +176,8 @@ output:
   - "flood" or "inundation" → flood: true
   - "burn" or "fire damage" → burn: true
   - "crop" or "cropland" or "agriculture" → crop: true
-- Include all checkpoint paths even for disabled models (documentation)
-- Paths are fixed — always use the exact values shown
+- Do NOT include checkpoint paths — the HPC orchestrator injects them at runtime
+- Only include the boolean flags (burn, flood, crop)
 
 ### 4. Baselines Section
 - **The executor auto-selects region-appropriate baselines:**
@@ -214,15 +211,17 @@ output:
 
 ### 7. GFM Section
 - **Required if any flood events exist** (gfm section triggers GFM download)
-- User must provide JRC credentials (email + password)
 - `date_range_days: 5` is standard (searches ±5 days around flood date)
+- Do NOT include JRC credentials or server paths — resolved at HPC runtime
 
-### 8. Paths Section
-- FIXED server paths — always use exact values shown
-- `flood_validation` path is required for GFM tile processing
+### 8. Server-Side Sections (paths, checkpoints, credentials)
+- Do NOT generate a `paths` section — injected by HPC orchestrator at runtime
+- Do NOT generate checkpoint paths in the `prithvi` section — injected at runtime
+- Do NOT generate JRC credentials in the `gfm` section — resolved from env vars at runtime
+- The config from Stage 3 contains ONLY scientific intent: rq, events, prithvi flags, baselines, datasets, analysis, gfm settings, and output
 
 ### 9. Output Section
-- `dir`: Use descriptive path based on RQ, e.g., `/rhome/vkolluru/AKD/CLSW_new/output/rq2_flood_crop_severity`
+- `dir`: Use a descriptive relative path, e.g., `output/rq2_flood_crop_severity` — the orchestrator resolves the full server path at runtime
 
 ---
 
@@ -251,8 +250,7 @@ When presenting the config YAML to the user in Stage 7:
 2. After the code block, provide the exact commands:
    ```
    Save as: configs/rq{N}_config.yaml
-   Copy executor: cp pipeline_executor.py prithvi_flood.py prithvi_crop.py /rhome/vkolluru/AKD/CLSW_new/prithvi/
-   Run: CUDA_VISIBLE_DEVICES=0 python -u prithvi/pipeline_executor.py --config configs/rq{N}_config.yaml
+   Submit: The config is submitted via job_submit → orchestrator patches paths and generates SLURM script automatically.
    ```
 3. Note that the executor pauses at each phase boundary for human review
 4. If crop dates are pending screening, provide the screening command first
@@ -263,10 +261,10 @@ When presenting the config YAML to the user in Stage 7:
 
 ### Flood × Crop (with NDVI severity)
 ```yaml
-prithvi: { burn: false, flood: true, crop: true, ... }
+prithvi: { burn: false, flood: true, crop: true }
 baselines: { flood: opera_dswx, crop: cdl, burn: null }
 datasets: [cdl, mod13a1, vnp13a1, opera_dswx, usda_nass, gridmet]
-gfm: { jrc_email: "...", jrc_password: "...", date_range_days: 5 }
+gfm: { date_range_days: 5 }
 analysis:
   comparison: [wilcoxon_signed_rank, paired_t_test]
   effect_size: [cohens_d]
@@ -277,7 +275,7 @@ analysis:
 
 ### Burn × Crop
 ```yaml
-prithvi: { burn: true, flood: false, crop: true, ... }
+prithvi: { burn: true, flood: false, crop: true }
 baselines: { burn: mcd64a1, flood: null, crop: cdl }
 datasets: [cdl, mod13a1, vnp13a1, mcd64a1, firms, usda_nass]
 analysis:

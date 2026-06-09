@@ -1,18 +1,18 @@
-"""FM_Prithvi-specialized closed-loop workflow agents.
+"""FM_Prithvi_EO-specialized closed-loop workflow agents.
 
-Provides FM_Prithvi-specific subclasses of the generic closed-loop stage agents,
-pre-configured with FM_Prithvi system prompts, context files, and MCP tools.
+Provides FM_Prithvi_EO-specific subclasses of the generic closed-loop stage agents,
+pre-configured with FM_Prithvi_EO system prompts, context files, and MCP tools.
 """
 
 from akd_ext.agents.closed_loop.prithvi.agents import (
     FMPrithviCapabilityFeasibilityMapperAgent,
     FMPrithviCapabilityFeasibilityMapperConfig,
+    FMPrithviExperimentAnalysisAgent,
+    FMPrithviExperimentAnalysisConfig,
     FMPrithviExperimentImplementationAgent,
     FMPrithviExperimentImplementationConfig,
     FMPrithviGapAgent,
     FMPrithviGapAgentConfig,
-    FMPrithviInterpretationPaperAssemblyAgent,
-    FMPrithviInterpretationPaperAssemblyConfig,
     FMPrithviResearchReportGeneratorAgent,
     FMPrithviResearchReportGeneratorConfig,
     FMPrithviWorkflowSpecBuilderAgent,
@@ -28,8 +28,8 @@ __all__ = [
     "FMPrithviWorkflowSpecBuilderConfig",
     "FMPrithviExperimentImplementationAgent",
     "FMPrithviExperimentImplementationConfig",
+    "FMPrithviExperimentAnalysisAgent",
+    "FMPrithviExperimentAnalysisConfig",
     "FMPrithviResearchReportGeneratorAgent",
     "FMPrithviResearchReportGeneratorConfig",
-    "FMPrithviInterpretationPaperAssemblyAgent",
-    "FMPrithviInterpretationPaperAssemblyConfig",
 ]

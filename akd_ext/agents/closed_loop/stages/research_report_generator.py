@@ -49,23 +49,36 @@ class ResearchReportGeneratorConfig(ClosedLoopStageConfig):
 class ResearchReportGeneratorInputSchema(InputSchema):
     """Input schema for Research Report Generator Agent.
 
-    Takes the workflow specification and job ID from the experiment stage.
-    The agent uses MCP tools to check job status and fetch figure URLs.
+    Receives context from Stages 1, 3, and 5 to produce a final report.
     """
 
+    research_question: str = Field(
+        default="",
+        description=(
+            "Stage 1 research question / gap analysis output. Contains the "
+            "hypothesis, variables, and evidence from the literature review."
+        ),
+    )
     workflow_spec: str = Field(
         ...,
         description=(
             "Stage 3 workflow specification markdown containing: research question, "
             "hypothesis, control definition, experiment matrix, feasibility notes, "
-            "and feasibility summary. This is the primary source of scientific context."
+            "and feasibility summary."
         ),
     )
-    job_id: str = Field(
-        ...,
+    figure_analysis: str = Field(
+        default="",
         description=(
-            "Job ID from the experiment implementation stage. Represents the entire batch of experiments. "
-            "The agent uses this to check batch completion status and fetch figure URLs via MCP tools."
+            "Stage 5 rendered markdown from ImageAnalyzerAgent — per-figure "
+            "descriptions with axes, legends, spatial patterns, and anomalies."
+        ),
+    )
+    pipeline_text_output: str = Field(
+        default="",
+        description=(
+            "Stage 5 fetched text content — CSV tables, markdown reports, "
+            "and other text artifacts downloaded from the pipeline output URLs."
         ),
     )
 

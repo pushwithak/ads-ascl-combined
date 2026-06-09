@@ -62,6 +62,127 @@ __all__ = [
 _COMPLETE = {"completed", "finished", "done", "success"}
 _FAILED = {"failed", "cancelled", "canceled", "error"}
 
+# File-type classification by extension
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".tiff", ".tif", ".bmp", ".webp"}
+_TEXT_EXTS = {".md", ".markdown", ".txt", ".text", ".rst", ".log"}
+_CSV_EXTS = {".csv", ".tsv"}
+
+
+# ---------------------------------------------------------------------------
+# URL content utilities — fetch text/CSV content, separate from images
+# ---------------------------------------------------------------------------
+
+
+def _url_extension(url: str) -> str:
+    """Extract lowercase file extension from a URL, ignoring query params."""
+    from urllib.parse import urlparse
+
+    path = urlparse(url).path
+    dot = path.rfind(".")
+    return path[dot:].lower() if dot != -1 else ""
+
+
+def _classify_url(url: str) -> str:
+    """Classify a URL as ``'image'``, ``'csv'``, ``'text'``, or ``'unknown'``."""
+    ext = _url_extension(url)
+    if ext in _IMAGE_EXTS:
+        return "image"
+    if ext in _CSV_EXTS:
+        return "csv"
+    if ext in _TEXT_EXTS:
+        return "text"
+    return "unknown"
+
+
+async def _fetch_text(url: str, timeout: float = 60.0) -> str:
+    """Download a URL and return its text content.
+
+    Returns the raw text for markdown/txt, or a formatted markdown table
+    for CSV/TSV files (up to 200 rows to avoid blowing up context).
+    """
+    import csv
+    import io
+
+    ext = _url_extension(url)
+    slug = url.rstrip("/").split("/")[-1].split("?")[0]
+
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        content = resp.text
+
+    if ext in _CSV_EXTS:
+        # Parse CSV/TSV → markdown table (cap at 200 rows)
+        delimiter = "\t" if ext == ".tsv" else ","
+        reader = csv.reader(io.StringIO(content), delimiter=delimiter)
+        rows = list(reader)
+        if not rows:
+            return f"*CSV `{slug}` is empty.*"
+        header = rows[0]
+        data = rows[1:201]  # cap
+        lines = [
+            f"### Data: `{slug}`",
+            "",
+            "| " + " | ".join(header) + " |",
+            "| " + " | ".join("---" for _ in header) + " |",
+        ]
+        for row in data:
+            # Pad/trim to header length
+            padded = row + [""] * (len(header) - len(row))
+            lines.append("| " + " | ".join(padded[: len(header)]) + " |")
+        if len(rows) - 1 > 200:
+            lines.append(f"\n*({len(rows) - 1} total rows — showing first 200)*")
+        return "\n".join(lines)
+
+    # Markdown / plain text — return as-is with a header
+    return f"### Report: `{slug}`\n\n{content}"
+
+
+async def _categorize_and_fetch(
+    urls: list[str],
+) -> tuple[list[str], str]:
+    """Split URLs into image URLs and fetched text content.
+
+    Returns
+    -------
+    image_urls : list[str]
+        URLs classified as images (passed to ImageAnalyzerAgent).
+    text_context : str
+        Concatenated text content from CSV / markdown / text URLs,
+        ready to be appended to the agent context.
+    """
+    image_urls: list[str] = []
+    text_parts: list[str] = []
+
+    for url in urls:
+        kind = _classify_url(url)
+        if kind == "image":
+            image_urls.append(url)
+        elif kind in ("csv", "text"):
+            try:
+                text = await _fetch_text(url)
+                text_parts.append(text)
+                logger.info(f"[Stage5] fetched {kind} content from {url} ({len(text)} chars)")
+            except Exception as exc:
+                logger.warning(f"[Stage5] failed to fetch {url}: {exc}")
+                text_parts.append(f"*Could not fetch `{url}`: {exc}*")
+        else:
+            # Unknown extension — try to fetch as text; fall back to image
+            try:
+                text = await _fetch_text(url)
+                text_parts.append(text)
+                logger.info(f"[Stage5] fetched unknown-type content from {url} ({len(text)} chars)")
+            except Exception:
+                image_urls.append(url)
+
+    text_context = ""
+    if text_parts:
+        text_context = (
+            "\n\n---\n\n## Pipeline Output Data\n\n"
+            + "\n\n---\n\n".join(text_parts)
+        )
+    return image_urls, text_context
+
 
 # -----------------------------------------------------------------------------
 # Configuration / Schemas
@@ -103,7 +224,7 @@ class ExperimentAnalysisInputSchema(InputSchema):
     )
     hypothesis: str = Field(
         default="",
-        description="Stage-1 feasibility report (CapabilityFeasibilityMapper output).",
+        description="Stage-1 research question and gap analysis output (Gap Agent).",
     )
     experiment_spec: str = Field(
         default="",
@@ -118,19 +239,40 @@ class ExperimentAnalysisInputSchema(InputSchema):
 class ExperimentAnalysisOutputSchema(OutputSchema):
     """Stage-5 structured output (only emitted when the job is complete).
 
-    Stage 5's contract is "give me the report" — so the deliverable is
-    ``markdown``.  ``status`` and ``message`` are kept as a marker channel
-    so callers can short-circuit on ``status != "completed"`` without
-    string-parsing the markdown.  Per-figure structured analyses are not
-    surfaced — they live inside the rendered Markdown and would otherwise
-    duplicate the same data twice.
+    Stage 5 returns **structured figure analyses** and any fetched text
+    data (CSVs, markdown reports from the pipeline).  It does NOT
+    generate a narrative report — that is Stage 6's job.
+
+    Downstream consumers (Stage 6 / Paper Assembly) receive:
+    - ``analyses``: per-figure ``FigureAnalysis`` objects from ImageAnalyzerAgent
+    - ``text_content``: concatenated CSV tables / markdown from pipeline outputs
+    - ``experiment_map``: ``{experiment_id: [figure_slugs]}`` for cross-referencing
     """
 
-    __response_field__ = "markdown"
+    __response_field__ = "analyses"
 
     status: Literal["completed"] = Field(default="completed")
-    message: str = Field(default="Experiment Finished and Analysis is ready")
-    markdown: str = Field(default="")
+    message: str = Field(default="Experiment analysis complete — figures analyzed")
+    analyses: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Per-figure structured analyses from ImageAnalyzerAgent (FigureAnalysis dicts).",
+    )
+    text_content: str = Field(
+        default="",
+        description="Fetched text content from pipeline outputs (CSV tables, markdown reports).",
+    )
+    experiment_map: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Mapping of experiment_id → list of figure slugs.",
+    )
+    image_urls: list[str] = Field(
+        default_factory=list,
+        description="Original image URLs fetched from job_plot.",
+    )
+    markdown: str = Field(
+        default="",
+        description="Rendered markdown from ImageAnalyzerAgent — formatted figure descriptions for Stage 6 context.",
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -150,11 +292,15 @@ async def _mcp_call(
 
     Falls back to the structuredContent dict when present, otherwise parses
     the concatenated text content. Returns ``{}`` if neither yields a dict.
-    Tolerates servers that wrap the real payload as a JSON string under
-    ``"payload"`` — that gets unwrapped into ``"payload_parsed"``.
+
+    Handles two common server wrappers:
+    - FastMCP cloud wraps responses as ``{"result": "<json_string>"}`` — the
+      inner JSON string is parsed and returned directly.
+    - Servers that wrap the real payload as a JSON string under ``"payload"``
+      — that gets unwrapped into ``"payload_parsed"``.
     """
     timeout = httpx.Timeout(connect=30.0, read=read_timeout, write=60.0, pool=60.0)
-    async with httpx.AsyncClient(headers={"X-API-Key": api_key}, timeout=timeout) as http_client:
+    async with httpx.AsyncClient(headers={"Authorization": f"Bearer {api_key}"}, timeout=timeout) as http_client:
         async with streamable_http_client(url=url, http_client=http_client) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
@@ -162,6 +308,16 @@ async def _mcp_call(
 
     structured = getattr(res, "structuredContent", None)
     if isinstance(structured, dict):
+        # FastMCP cloud wraps the real JSON payload as a string under "result"
+        # e.g. {"result": '{"job_id": "abc", "status": "completed"}'}
+        raw_result = structured.get("result")
+        if isinstance(raw_result, str):
+            try:
+                inner = json.loads(raw_result)
+                if isinstance(inner, dict):
+                    return inner
+            except json.JSONDecodeError:
+                pass
         return structured
 
     text = "".join(getattr(b, "text", "") or "" for b in (getattr(res, "content", None) or [])).strip()
@@ -171,6 +327,14 @@ async def _mcp_call(
         obj = json.loads(text)
     except json.JSONDecodeError:
         return {"raw": text}
+    # FastMCP result wrapper (same as structuredContent path)
+    if isinstance(obj, dict) and isinstance(obj.get("result"), str):
+        try:
+            inner = json.loads(obj["result"])
+            if isinstance(inner, dict):
+                obj = inner
+        except json.JSONDecodeError:
+            pass
     if isinstance(obj, dict) and isinstance(obj.get("payload"), str):
         try:
             obj["payload_parsed"] = json.loads(obj["payload"])
@@ -275,7 +439,7 @@ class ExperimentAnalysisAgent(
             )
         except Exception as exc:
             logger.warning(f"[Stage5] job_status failed: {exc!r}")
-            return TextOutput(content=f"Could not reach CM1 MCP for `{job_id}`: {exc}")
+            return TextOutput(content=f"Could not reach MCP server for `{job_id}`: {exc}")
 
         logger.info(f"[Stage5] job_status payload keys: {list(payload.keys())}")
         status = self._extract_status(payload)
@@ -283,8 +447,11 @@ class ExperimentAnalysisAgent(
             return TextOutput(content=f"Job `{job_id}` failed (status=`{status}`). No analysis.")
         if status not in _COMPLETE:
             return TextOutput(
-                content=f"Job `{job_id}` is still running (status=`{status}`). "
-                "Re-run Stage 5 once the batch completes."
+                content=(
+                    f"⏳ Job `{job_id}` is still running (status=`{status}`). "
+                    "Figure analysis has NOT started — it will only begin once the "
+                    "job is complete. Ask me to check again in a bit."
+                )
             )
         return payload
 
@@ -301,10 +468,14 @@ class ExperimentAnalysisAgent(
         return workspace, params.user_name or self.config.default_user_name
 
     async def _fetch_plot_urls(self, job_id: str, workspace: str, user: str) -> dict[str, list[str]] | TextOutput:
-        """MCP job_plot → ``{experiment_id: [urls]}`` dict, or TextOutput on error / empty.
+        """MCP job_plot → ``{group: [urls]}`` dict, or TextOutput on error / empty.
 
-        The keys are experiment IDs (e.g. ``EXP_stability_baseline``).
-        Callers use :meth:`_flatten` when they need a plain URL list.
+        Handles two response shapes:
+        - **Grouped**: ``{experiment_id: [url, ...], ...}``  (list values)
+        - **Flat + extras**: ``{"figures": [url, ...], "report_url": "..."}``
+
+        String values that look like URLs (``http``-prefixed) are collected
+        into a ``"results"`` group so they flow through the same pipeline.
         """
         try:
             plot_payload = await _mcp_call(
@@ -317,14 +488,28 @@ class ExperimentAnalysisAgent(
             logger.warning(f"[Stage5] job_plot failed: {exc!r}")
             return TextOutput(content=f"Failed to fetch plots for `{job_id}`: {exc}")
 
-        plot_urls = {
-            k: v for k, v in plot_payload.items()
-            if isinstance(v, list) and not k.startswith("_") and k != "payload"
-        }
-        n_figures = len(self._flatten(plot_urls))
-        if not n_figures:
-            return TextOutput(content=f"Job `{job_id}` is complete but `job_plot` returned no figures.")
-        logger.info(f"[Stage5] job_id={job_id} workspace={workspace!r} figures={n_figures} groups={list(plot_urls.keys())}")
+        plot_urls: dict[str, list[str]] = {}
+        extra_urls: list[str] = []
+
+        for k, v in plot_payload.items():
+            if k.startswith("_") or k in ("payload", "job_id"):
+                continue
+            if isinstance(v, list):
+                # List of URLs (grouped by experiment or "figures")
+                urls = [u for u in v if isinstance(u, str) and u.startswith("http")]
+                if urls:
+                    plot_urls[k] = urls
+            elif isinstance(v, str) and v.startswith("http"):
+                # Single URL string (e.g. report_url, summary_url)
+                extra_urls.append(v)
+
+        if extra_urls:
+            plot_urls.setdefault("results", []).extend(extra_urls)
+
+        n_total = len(self._flatten(plot_urls))
+        if not n_total:
+            return TextOutput(content=f"Job `{job_id}` is complete but `job_plot` returned no figures or data.")
+        logger.info(f"[Stage5] job_id={job_id} workspace={workspace!r} urls={n_total} groups={list(plot_urls.keys())}")
         return plot_urls
 
     # -- Pipeline (_arun) ----------------------------------------------
@@ -349,14 +534,48 @@ class ExperimentAnalysisAgent(
         if isinstance(experiment_urls, TextOutput):
             return experiment_urls
 
-        urls = self._flatten(experiment_urls)
+        all_urls = self._flatten(experiment_urls)
+
+        # Separate images from text content (CSV, markdown, etc.)
+        image_urls, fetched_text = await _categorize_and_fetch(all_urls)
+        logger.info(
+            f"[Stage5] {len(image_urls)} image URLs, "
+            f"{len(fetched_text)} chars of fetched text content"
+        )
+
+        # fetched_text (report .md, CSVs) is saved in text_content for Stage 6
+        # but NOT appended to the ImageAnalyzer context — the analyzer focuses
+        # on interpreting the figures, not regurgitating report text.
         context = self._build_context(params, experiment_urls)
+
+        # Build experiment → slug mapping for downstream consumers
+        exp_map: dict[str, list[str]] = {}
+        for exp_id, urls in experiment_urls.items():
+            exp_map[exp_id] = [
+                url.rstrip("/").split("/")[-1].split("?")[0]
+                for url in urls if isinstance(url, str)
+            ]
+
+        if not image_urls:
+            # No images — return text content only
+            return ExperimentAnalysisOutputSchema(
+                text_content=fetched_text or "No figures or data returned by job_plot.",
+                experiment_map=exp_map,
+            )
+
         result = await ImageAnalyzerAgent(self.config.analyzer_config).arun(
-            ImageAnalyzerInputSchema(urls=urls, context=context),
+            ImageAnalyzerInputSchema(urls=image_urls, context=context),
         )
         if not isinstance(result, ImageAnalyzerOutputSchema):
             return cast(TextOutput, result)
-        return ExperimentAnalysisOutputSchema(markdown=result.markdown)
+
+        return ExperimentAnalysisOutputSchema(
+            analyses=[a.model_dump() for a in result.analyses],
+            text_content=fetched_text,
+            experiment_map=exp_map,
+            image_urls=image_urls,
+            markdown=result.markdown,
+        )
 
     # -- Pipeline (_astream) -------------------------------------------
 
@@ -397,23 +616,54 @@ class ExperimentAnalysisAgent(
             yield CompletedEvent(source=cn, message=f"Completed {cn}", data=CompletedEventData(output=experiment_urls), run_context=run_context)
             return
 
-        urls = self._flatten(experiment_urls)
-        yield RunningEvent(source=cn, message=f"Got {len(urls)} figures across {len(experiment_urls)} experiments. Analyzing…", run_context=run_context)
+        all_urls = self._flatten(experiment_urls)
+
+        # Separate images from text content (CSV, markdown, etc.)
+        yield RunningEvent(source=cn, message=f"Got {len(all_urls)} URLs. Fetching text content…", run_context=run_context)
+        image_urls, fetched_text = await _categorize_and_fetch(all_urls)
+        yield RunningEvent(
+            source=cn,
+            message=f"{len(image_urls)} images, {len(fetched_text)} chars text. Analyzing…",
+            run_context=run_context,
+        )
+
+        context = self._build_context(params, experiment_urls)
+
+        # Build experiment → slug mapping for downstream consumers
+        exp_map: dict[str, list[str]] = {}
+        for exp_id, urls in experiment_urls.items():
+            exp_map[exp_id] = [
+                url.rstrip("/").split("/")[-1].split("?")[0]
+                for url in urls if isinstance(url, str)
+            ]
+
+        if not image_urls:
+            final = ExperimentAnalysisOutputSchema(
+                text_content=fetched_text or "No figures or data returned by job_plot.",
+                experiment_map=exp_map,
+            )
+            yield CompletedEvent(source=cn, message=f"Completed {cn}", data=CompletedEventData(output=final), run_context=run_context)
+            return
 
         # 4. Delegate — forward ImageAnalyzerAgent's streaming events
-        context = self._build_context(params, experiment_urls)
         analyzer = ImageAnalyzerAgent(self.config.analyzer_config)
         result: ImageAnalyzerOutputSchema | TextOutput | None = None
 
-        async for event in analyzer.astream(ImageAnalyzerInputSchema(urls=urls, context=context)):
+        async for event in analyzer.astream(ImageAnalyzerInputSchema(urls=image_urls, context=context)):
             if isinstance(event, PartialOutputEvent):
                 yield PartialOutputEvent(source=cn, message=event.message, data=event.data, run_context=run_context)
             elif isinstance(event, CompletedEvent):
                 result = event.data.output
 
-        # 5. Wrap
+        # 5. Wrap — return structured analyses, NOT a rendered report
         if isinstance(result, ImageAnalyzerOutputSchema):
-            final = ExperimentAnalysisOutputSchema(markdown=result.markdown)
+            final = ExperimentAnalysisOutputSchema(
+                analyses=[a.model_dump() for a in result.analyses],
+                text_content=fetched_text,
+                experiment_map=exp_map,
+                image_urls=image_urls,
+                markdown=result.markdown,
+            )
         elif result is not None:
             final = cast(TextOutput, result)
         else:
@@ -424,6 +674,6 @@ class ExperimentAnalysisAgent(
     # -- Output validation ---------------------------------------------
 
     def check_output(self, output) -> str | None:
-        if isinstance(output, ExperimentAnalysisOutputSchema) and not output.markdown.strip():
-            return "Markdown report is empty — the image analyzer produced no content."
+        if isinstance(output, ExperimentAnalysisOutputSchema) and not output.analyses and not output.text_content.strip():
+            return "No figure analyses or text content — the image analyzer produced no output."
         return super().check_output(output)
