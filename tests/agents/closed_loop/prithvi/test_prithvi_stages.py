@@ -144,6 +144,14 @@ class TestStage3WorkflowSpecBuilder:
         assert "geocode" in allowed
         assert "reverse_geocode" in allowed
 
+    def test_no_tools_when_url_missing(self, monkeypatch):
+        # Key set but URL unset → degrade to no tools, not a tool with empty url.
+        from akd_ext.agents.closed_loop.prithvi.tools import get_default_spec_builder_tools
+
+        monkeypatch.setenv("PRITHVI_MCP_API_KEY", "test-key")
+        monkeypatch.delenv("PRITHVI_MCP_URL", raising=False)
+        assert get_default_spec_builder_tools() == []
+
     def test_context_files(self):
         from akd_ext.agents.closed_loop.prithvi import FMPrithviWorkflowSpecBuilderConfig
 
@@ -275,6 +283,44 @@ class TestStage5ExperimentAnalysis:
         assert _classify_url("https://example.com/report.md") == "text"
         assert _classify_url("https://example.com/unknown.xyz") == "unknown"
 
+    def test_extensionless_image_routed_by_content_type(self, monkeypatch):
+        """An extensionless image URL must route to the analyzer via Content-Type,
+        not be decoded as mojibake text (httpx.Response.text never raises on bytes)."""
+        import asyncio
+
+        from akd_ext.agents.closed_loop.stages import experiment_analysis as ea
+
+        class _Resp:
+            def __init__(self, text, ctype):
+                self.text = text
+                self.headers = {"content-type": ctype}
+
+            def raise_for_status(self):
+                pass
+
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+            async def get(self, url):
+                if "figure" in url:
+                    return _Resp("\x89PNG-bytes", "image/png")
+                return _Resp("# Report", "text/markdown")
+
+        monkeypatch.setattr(ea.httpx, "AsyncClient", _Client)
+        imgs, text = asyncio.run(
+            ea._categorize_and_fetch(["https://x/figure_nodot", "https://x/report.md"])
+        )
+        assert "https://x/figure_nodot" in imgs
+        assert "PNG-bytes" not in text
+        assert "Report" in text
+
 
 # ── Stage 6: Research Report Generator ──────────────────────────────────
 
@@ -298,14 +344,37 @@ class TestStage6ResearchReportGenerator:
         assert len(cfg.tools) == 0
 
     def test_input_schema_no_job_id(self):
+        # Prithvi uses its OWN input schema (no job_id, no MCP tools).
+        from akd_ext.agents.closed_loop.prithvi import (
+            FMPrithviResearchReportGeneratorInputSchema,
+        )
+
+        fields = set(FMPrithviResearchReportGeneratorInputSchema.model_fields.keys())
+        assert "job_id" not in fields
+        expected = {"research_question", "workflow_spec", "figure_analysis", "pipeline_text_output"}
+        assert fields == expected
+
+    def test_shared_schema_still_has_job_id_for_cm1(self):
+        # The shared/generic schema must keep job_id intact — CM1's Stage 6
+        # depends on it. Prithvi must not mutate the shared schema.
         from akd_ext.agents.closed_loop.stages.research_report_generator import (
             ResearchReportGeneratorInputSchema,
         )
 
         fields = set(ResearchReportGeneratorInputSchema.model_fields.keys())
-        assert "job_id" not in fields
-        expected = {"research_question", "workflow_spec", "figure_analysis", "pipeline_text_output"}
-        assert fields == expected
+        assert "job_id" in fields
+        assert "workflow_spec" in fields
+
+    def test_agent_uses_prithvi_input_schema(self):
+        from akd_ext.agents.closed_loop.prithvi import (
+            FMPrithviResearchReportGeneratorAgent,
+            FMPrithviResearchReportGeneratorInputSchema,
+        )
+
+        assert (
+            FMPrithviResearchReportGeneratorAgent.input_schema
+            is FMPrithviResearchReportGeneratorInputSchema
+        )
 
     def test_prompt_no_mcp_tools(self):
         from akd_ext.agents.closed_loop.prithvi import FMPrithviResearchReportGeneratorConfig

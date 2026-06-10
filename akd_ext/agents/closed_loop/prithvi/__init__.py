@@ -15,6 +15,7 @@ from akd_ext.agents.closed_loop.prithvi.agents import (
     FMPrithviGapAgentConfig,
     FMPrithviResearchReportGeneratorAgent,
     FMPrithviResearchReportGeneratorConfig,
+    FMPrithviResearchReportGeneratorInputSchema,
     FMPrithviWorkflowSpecBuilderAgent,
     FMPrithviWorkflowSpecBuilderConfig,
 )
@@ -32,4 +33,5 @@ __all__ = [
     "FMPrithviExperimentAnalysisConfig",
     "FMPrithviResearchReportGeneratorAgent",
     "FMPrithviResearchReportGeneratorConfig",
+    "FMPrithviResearchReportGeneratorInputSchema",
 ]

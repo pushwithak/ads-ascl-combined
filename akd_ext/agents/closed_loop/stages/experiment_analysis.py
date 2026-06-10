@@ -19,6 +19,7 @@ and the completion-status branching around it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from collections.abc import AsyncIterator
@@ -67,6 +68,10 @@ _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".tiff", ".tif", ".bmp", ".webp"
 _TEXT_EXTS = {".md", ".markdown", ".txt", ".text", ".rst", ".log"}
 _CSV_EXTS = {".csv", ".tsv"}
 
+# Cap on fetched text payloads (markdown/txt/log) before they reach an LLM
+# prompt — prevents a multi-MB pipeline log from ballooning the context.
+_MAX_TEXT_CHARS = 20_000
+
 
 # ---------------------------------------------------------------------------
 # URL content utilities — fetch text/CSV content, separate from images
@@ -82,6 +87,11 @@ def _url_extension(url: str) -> str:
     return path[dot:].lower() if dot != -1 else ""
 
 
+def _slug(url: str) -> str:
+    """Filename slug from a URL: last path segment, query stripped."""
+    return url.rstrip("/").split("/")[-1].split("?")[0]
+
+
 def _classify_url(url: str) -> str:
     """Classify a URL as ``'image'``, ``'csv'``, ``'text'``, or ``'unknown'``."""
     ext = _url_extension(url)
@@ -94,22 +104,40 @@ def _classify_url(url: str) -> str:
     return "unknown"
 
 
-async def _fetch_text(url: str, timeout: float = 60.0) -> str:
-    """Download a URL and return its text content.
+class _BinaryContent(Exception):
+    """Raised when a fetched URL is binary (image/pdf/etc.) so it should be
+    routed to the image analyzer instead of decoded as text. Needed because
+    ``httpx.Response.text`` never raises on binary bytes — it just produces
+    mojibake — so an extension check alone can't catch extensionless images."""
+
+
+async def _fetch_text(url: str, client: httpx.AsyncClient) -> str:
+    """Download a URL with a shared client and return its text content.
 
     Returns the raw text for markdown/txt, or a formatted markdown table
     for CSV/TSV files (up to 200 rows to avoid blowing up context).
+
+    Raises ``_BinaryContent`` when the response Content-Type indicates binary
+    (image/pdf/octet-stream) and the extension didn't already mark it text/CSV —
+    the caller routes those to the image analyzer.
     """
     import csv
     import io
 
     ext = _url_extension(url)
-    slug = url.rstrip("/").split("/")[-1].split("?")[0]
+    slug = _slug(url)
 
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        content = resp.text
+    resp = await client.get(url)
+    resp.raise_for_status()
+
+    # For non-text/CSV extensions, trust the Content-Type: binary content
+    # (images, PDFs) must not be decoded as text and fed to the LLM.
+    if ext not in _TEXT_EXTS and ext not in _CSV_EXTS:
+        ctype = resp.headers.get("content-type", "").lower()
+        if any(t in ctype for t in ("image/", "application/pdf", "application/octet-stream")):
+            raise _BinaryContent(ctype or "binary")
+
+    content = resp.text
 
     if ext in _CSV_EXTS:
         # Parse CSV/TSV → markdown table (cap at 200 rows)
@@ -134,46 +162,62 @@ async def _fetch_text(url: str, timeout: float = 60.0) -> str:
             lines.append(f"\n*({len(rows) - 1} total rows — showing first 200)*")
         return "\n".join(lines)
 
-    # Markdown / plain text — return as-is with a header
+    # Markdown / plain text — cap to avoid ballooning the LLM context with a
+    # multi-MB log; note the truncation like the CSV branch does.
+    if len(content) > _MAX_TEXT_CHARS:
+        content = (
+            content[:_MAX_TEXT_CHARS]
+            + f"\n\n*(truncated — showing first {_MAX_TEXT_CHARS:,} of "
+            f"{len(content):,} characters)*"
+        )
     return f"### Report: `{slug}`\n\n{content}"
 
 
 async def _categorize_and_fetch(
-    urls: list[str],
+    urls: list[str], timeout: float = 60.0,
 ) -> tuple[list[str], str]:
     """Split URLs into image URLs and fetched text content.
+
+    Text/CSV URLs are fetched concurrently through a single shared client.
+    Unknown extensions are attempted as text and fall back to image on failure.
 
     Returns
     -------
     image_urls : list[str]
         URLs classified as images (passed to ImageAnalyzerAgent).
     text_context : str
-        Concatenated text content from CSV / markdown / text URLs,
-        ready to be appended to the agent context.
+        Concatenated text content from CSV / markdown / text URLs.
     """
     image_urls: list[str] = []
-    text_parts: list[str] = []
-
+    to_fetch: list[str] = []  # csv/text/unknown URLs to download
     for url in urls:
-        kind = _classify_url(url)
-        if kind == "image":
+        if _classify_url(url) == "image":
             image_urls.append(url)
-        elif kind in ("csv", "text"):
-            try:
-                text = await _fetch_text(url)
-                text_parts.append(text)
-                logger.info(f"[Stage5] fetched {kind} content from {url} ({len(text)} chars)")
-            except Exception as exc:
-                logger.warning(f"[Stage5] failed to fetch {url}: {exc}")
-                text_parts.append(f"*Could not fetch `{url}`: {exc}*")
         else:
-            # Unknown extension — try to fetch as text; fall back to image
-            try:
-                text = await _fetch_text(url)
-                text_parts.append(text)
-                logger.info(f"[Stage5] fetched unknown-type content from {url} ({len(text)} chars)")
-            except Exception:
+            to_fetch.append(url)
+
+    text_parts: list[str] = []
+    if to_fetch:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            results = await asyncio.gather(
+                *(_fetch_text(u, client) for u in to_fetch),
+                return_exceptions=True,
+            )
+        for url, result in zip(to_fetch, results):
+            if isinstance(result, _BinaryContent):
+                # Content-Type says binary (image/pdf) — route to the analyzer.
+                logger.info(f"[Stage5] {url} is binary ({result}) — routing to image analyzer")
                 image_urls.append(url)
+            elif isinstance(result, Exception):
+                if _classify_url(url) == "unknown":
+                    # Unknown type that failed to fetch — treat as image.
+                    image_urls.append(url)
+                else:
+                    logger.warning(f"[Stage5] failed to fetch {url}: {result}")
+                    text_parts.append(f"*Could not fetch `{url}`: {result}*")
+            else:
+                logger.info(f"[Stage5] fetched content from {url} ({len(result)} chars)")
+                text_parts.append(result)
 
     text_context = ""
     if text_parts:
@@ -247,9 +291,13 @@ class ExperimentAnalysisOutputSchema(OutputSchema):
     - ``analyses``: per-figure ``FigureAnalysis`` objects from ImageAnalyzerAgent
     - ``text_content``: concatenated CSV tables / markdown from pipeline outputs
     - ``experiment_map``: ``{experiment_id: [figure_slugs]}`` for cross-referencing
+    - ``markdown``: rendered figure-analysis report (the human-facing response)
     """
 
-    __response_field__ = "analyses"
+    # Response channel must be a string (the _response computed field is typed
+    # -> str). Point it at the rendered ``markdown``; ``analyses`` is the
+    # structured list consumers read programmatically.
+    __response_field__ = "markdown"
 
     status: Literal["completed"] = Field(default="completed")
     message: str = Field(default="Experiment analysis complete — figures analyzed")
@@ -283,12 +331,17 @@ class ExperimentAnalysisOutputSchema(OutputSchema):
 async def _mcp_call(
     *,
     url: str,
-    api_key: str,
+    headers: dict[str, str],
     tool: str,
     args: dict[str, Any],
     read_timeout: float,
 ) -> dict[str, Any]:
     """Invoke an MCP tool via streamable-HTTP and return the parsed JSON dict.
+
+    ``headers`` carries the auth header for the target server. The auth scheme
+    is a per-server property (e.g. CM1 uses ``X-API-Key``, Prithvi uses
+    ``Authorization: Bearer``); callers supply it via the agent's
+    ``_auth_headers`` hook rather than hardcoding it here.
 
     Falls back to the structuredContent dict when present, otherwise parses
     the concatenated text content. Returns ``{}`` if neither yields a dict.
@@ -300,7 +353,7 @@ async def _mcp_call(
       — that gets unwrapped into ``"payload_parsed"``.
     """
     timeout = httpx.Timeout(connect=30.0, read=read_timeout, write=60.0, pool=60.0)
-    async with httpx.AsyncClient(headers={"Authorization": f"Bearer {api_key}"}, timeout=timeout) as http_client:
+    async with httpx.AsyncClient(headers=headers, timeout=timeout) as http_client:
         async with streamable_http_client(url=url, http_client=http_client) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
@@ -366,6 +419,13 @@ class ExperimentAnalysisAgent(
             raise RuntimeError("CM1_MCP_API_KEY is not set; cannot reach the CM1 MCP.")
         return key
 
+    @property
+    def _auth_headers(self) -> dict[str, str]:
+        """Auth header for the MCP server. Per-server scheme — override in
+        subclasses whose server uses a different scheme (e.g. Prithvi uses
+        ``Authorization: Bearer``). Defaults to CM1's ``X-API-Key``."""
+        return {"X-API-Key": self._api_key}
+
     @staticmethod
     def _workspace_from(payload: dict[str, Any]) -> str | None:
         """Extract workspace_name from a job_status payload, top-level or wrapped."""
@@ -399,7 +459,7 @@ class ExperimentAnalysisAgent(
             "",
         ]
         for exp_id, urls in experiment_urls.items():
-            slugs = [url.rstrip("/").split("/")[-1].split("?")[0] for url in urls if isinstance(url, str)]
+            slugs = [_slug(url) for url in urls if isinstance(url, str)]
             lines.append(f"- **{exp_id}** ({len(slugs)} figures): {', '.join(slugs)}")
         return "\n".join(lines)
 
@@ -434,7 +494,7 @@ class ExperimentAnalysisAgent(
         """MCP job_status → payload dict, or TextOutput on error / not-complete."""
         try:
             payload = await _mcp_call(
-                url=self.config.mcp_url, api_key=self._api_key,
+                url=self.config.mcp_url, headers=self._auth_headers,
                 tool="job_status", args={"job_id": job_id}, read_timeout=60.0,
             )
         except Exception as exc:
@@ -479,7 +539,7 @@ class ExperimentAnalysisAgent(
         """
         try:
             plot_payload = await _mcp_call(
-                url=self.config.mcp_url, api_key=self._api_key,
+                url=self.config.mcp_url, headers=self._auth_headers,
                 tool="job_plot",
                 args={"job_id": job_id, "workspace_name": workspace, "user_name": user},
                 read_timeout=self.config.plot_read_timeout_seconds,
@@ -511,6 +571,42 @@ class ExperimentAnalysisAgent(
             return TextOutput(content=f"Job `{job_id}` is complete but `job_plot` returned no figures or data.")
         logger.info(f"[Stage5] job_id={job_id} workspace={workspace!r} urls={n_total} groups={list(plot_urls.keys())}")
         return plot_urls
+
+    # -- Output builders (shared by _arun and _astream) ----------------
+
+    @staticmethod
+    def _build_exp_map(experiment_urls: dict[str, list[str]]) -> dict[str, list[str]]:
+        """Map each experiment id → its figure slugs."""
+        return {
+            exp_id: [_slug(u) for u in urls if isinstance(u, str)]
+            for exp_id, urls in experiment_urls.items()
+        }
+
+    @staticmethod
+    def _text_only_output(
+        fetched_text: str, exp_map: dict[str, list[str]]
+    ) -> ExperimentAnalysisOutputSchema:
+        """Output for the no-image case (text artifacts only, no figures)."""
+        return ExperimentAnalysisOutputSchema(
+            text_content=fetched_text or "No figures or data returned by job_plot.",
+            experiment_map=exp_map,
+        )
+
+    @staticmethod
+    def _analyzed_output(
+        result: ImageAnalyzerOutputSchema,
+        fetched_text: str,
+        exp_map: dict[str, list[str]],
+        image_urls: list[str],
+    ) -> ExperimentAnalysisOutputSchema:
+        """Output wrapping the ImageAnalyzer's per-figure analyses."""
+        return ExperimentAnalysisOutputSchema(
+            analyses=[a.model_dump() for a in result.analyses],
+            text_content=fetched_text,
+            experiment_map=exp_map,
+            image_urls=image_urls,
+            markdown=result.markdown,
+        )
 
     # -- Pipeline (_arun) ----------------------------------------------
 
@@ -547,35 +643,17 @@ class ExperimentAnalysisAgent(
         # but NOT appended to the ImageAnalyzer context — the analyzer focuses
         # on interpreting the figures, not regurgitating report text.
         context = self._build_context(params, experiment_urls)
-
-        # Build experiment → slug mapping for downstream consumers
-        exp_map: dict[str, list[str]] = {}
-        for exp_id, urls in experiment_urls.items():
-            exp_map[exp_id] = [
-                url.rstrip("/").split("/")[-1].split("?")[0]
-                for url in urls if isinstance(url, str)
-            ]
+        exp_map = self._build_exp_map(experiment_urls)
 
         if not image_urls:
-            # No images — return text content only
-            return ExperimentAnalysisOutputSchema(
-                text_content=fetched_text or "No figures or data returned by job_plot.",
-                experiment_map=exp_map,
-            )
+            return self._text_only_output(fetched_text, exp_map)
 
         result = await ImageAnalyzerAgent(self.config.analyzer_config).arun(
             ImageAnalyzerInputSchema(urls=image_urls, context=context),
         )
         if not isinstance(result, ImageAnalyzerOutputSchema):
             return cast(TextOutput, result)
-
-        return ExperimentAnalysisOutputSchema(
-            analyses=[a.model_dump() for a in result.analyses],
-            text_content=fetched_text,
-            experiment_map=exp_map,
-            image_urls=image_urls,
-            markdown=result.markdown,
-        )
+        return self._analyzed_output(result, fetched_text, exp_map, image_urls)
 
     # -- Pipeline (_astream) -------------------------------------------
 
@@ -628,20 +706,10 @@ class ExperimentAnalysisAgent(
         )
 
         context = self._build_context(params, experiment_urls)
-
-        # Build experiment → slug mapping for downstream consumers
-        exp_map: dict[str, list[str]] = {}
-        for exp_id, urls in experiment_urls.items():
-            exp_map[exp_id] = [
-                url.rstrip("/").split("/")[-1].split("?")[0]
-                for url in urls if isinstance(url, str)
-            ]
+        exp_map = self._build_exp_map(experiment_urls)
 
         if not image_urls:
-            final = ExperimentAnalysisOutputSchema(
-                text_content=fetched_text or "No figures or data returned by job_plot.",
-                experiment_map=exp_map,
-            )
+            final = self._text_only_output(fetched_text, exp_map)
             yield CompletedEvent(source=cn, message=f"Completed {cn}", data=CompletedEventData(output=final), run_context=run_context)
             return
 
@@ -657,13 +725,7 @@ class ExperimentAnalysisAgent(
 
         # 5. Wrap — return structured analyses, NOT a rendered report
         if isinstance(result, ImageAnalyzerOutputSchema):
-            final = ExperimentAnalysisOutputSchema(
-                analyses=[a.model_dump() for a in result.analyses],
-                text_content=fetched_text,
-                experiment_map=exp_map,
-                image_urls=image_urls,
-                markdown=result.markdown,
-            )
+            final = self._analyzed_output(result, fetched_text, exp_map, image_urls)
         elif result is not None:
             final = cast(TextOutput, result)
         else:

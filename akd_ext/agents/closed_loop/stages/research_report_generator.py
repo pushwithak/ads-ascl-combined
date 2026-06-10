@@ -49,36 +49,27 @@ class ResearchReportGeneratorConfig(ClosedLoopStageConfig):
 class ResearchReportGeneratorInputSchema(InputSchema):
     """Input schema for Research Report Generator Agent.
 
-    Receives context from Stages 1, 3, and 5 to produce a final report.
+    Takes the workflow specification and job ID from the experiment stage.
+    The agent uses MCP tools to check job status and fetch figure URLs.
+
+    Note: domains whose Stage 6 receives pre-analyzed figures instead of a
+    ``job_id`` (e.g. Prithvi) define their own input schema and override
+    ``input_schema`` on their agent subclass rather than mutating this one.
     """
 
-    research_question: str = Field(
-        default="",
-        description=(
-            "Stage 1 research question / gap analysis output. Contains the "
-            "hypothesis, variables, and evidence from the literature review."
-        ),
-    )
     workflow_spec: str = Field(
         ...,
         description=(
             "Stage 3 workflow specification markdown containing: research question, "
             "hypothesis, control definition, experiment matrix, feasibility notes, "
-            "and feasibility summary."
+            "and feasibility summary. This is the primary source of scientific context."
         ),
     )
-    figure_analysis: str = Field(
-        default="",
+    job_id: str = Field(
+        ...,
         description=(
-            "Stage 5 rendered markdown from ImageAnalyzerAgent — per-figure "
-            "descriptions with axes, legends, spatial patterns, and anomalies."
-        ),
-    )
-    pipeline_text_output: str = Field(
-        default="",
-        description=(
-            "Stage 5 fetched text content — CSV tables, markdown reports, "
-            "and other text artifacts downloaded from the pipeline output URLs."
+            "Job ID from the experiment implementation stage. Represents the entire batch of experiments. "
+            "The agent uses this to check batch completion status and fetch figure URLs via MCP tools."
         ),
     )
 

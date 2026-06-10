@@ -1,13 +1,12 @@
 """Geocode tool — convert a place name to a bounding box.
 
-Uses the free Nominatim (OpenStreetMap) API. Rate limit: 1 req/sec
-enforced by sleep.
+Uses the free Nominatim (OpenStreetMap) API, rate-limited via the shared
+throttle in ``_nominatim`` (1 req/sec across geocode + reverse_geocode).
 """
 
 from __future__ import annotations
 
 import asyncio
-import time
 
 import requests
 from pydantic import ConfigDict, Field
@@ -15,9 +14,9 @@ from pydantic import ConfigDict, Field
 from akd._base import InputSchema, OutputSchema
 from akd.tools import BaseTool, BaseToolConfig
 from akd_ext.mcp import mcp_tool
+from akd_ext.tools._nominatim import nominatim_get
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-HEADERS = {"User-Agent": "prithvi-workshop-agent/1.0"}
 
 
 class GeoCodeInput(InputSchema):
@@ -66,18 +65,14 @@ class GeoCodeConfig(BaseToolConfig):
 
 
 def _geocode_location(query: str) -> dict:
-    """Call Nominatim search API."""
+    """Call Nominatim search API (rate-limited via the shared throttle)."""
     params = {"q": query, "format": "json", "limit": 5}
     try:
-        resp = requests.get(
-            NOMINATIM_URL, params=params, headers=HEADERS, timeout=10
-        )
+        resp = nominatim_get(NOMINATIM_URL, params)
         resp.raise_for_status()
         results = resp.json()
     except requests.RequestException as e:
         return {"message": f"Geocoding service unavailable: {e}"}
-    finally:
-        time.sleep(1)  # Nominatim enforces 1 req/sec
 
     if not results:
         return {

@@ -7,10 +7,13 @@ system prompts, context files, tools, and descriptions pre-configured.
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from pydantic import Field
+
+from akd._base import InputSchema
 
 from akd_ext.agents.closed_loop.prithvi.prompts import (
     CAPABILITY_FEASIBILITY_MAPPER_SYSTEM_PROMPT,
@@ -54,32 +57,38 @@ from akd_ext.agents.closed_loop.stages.research_report_generator import (
 _CONTEXT_DIR = Path(__file__).parent / "context"
 
 
+@lru_cache(maxsize=None)
+def _read(name: str) -> str:
+    """Read a context .md file, cached so it is not re-read on every config init."""
+    return (_CONTEXT_DIR / name).read_text()
+
+
 def _load_prithvi_gap_agent_context() -> dict[str, str]:
     """Load Prithvi Gap Agent context files."""
     return {
-        "Gap Detection Process": (_CONTEXT_DIR / "gap_detection_process.md").read_text(),
-        "Pipeline Capabilities": (_CONTEXT_DIR / "pipeline_capabilities.md").read_text(),
+        "Gap Detection Process": _read("gap_detection_process.md"),
+        "Pipeline Capabilities": _read("pipeline_capabilities.md"),
     }
 
 
 def _load_prithvi_feasibility_context() -> dict[str, str]:
     """Load Prithvi Capability & Feasibility Mapper context files."""
     return {
-        "Pipeline Capabilities": (_CONTEXT_DIR / "pipeline_capabilities.md").read_text(),
-        "Feasibility Mapper Reference": (_CONTEXT_DIR / "feasibility_mapper_reference.md").read_text(),
-        "Ancillary Dataset Inventory": (_CONTEXT_DIR / "ancillary_dataset_inventory.md").read_text(),
-        "Feasibility Mapper Governance": (_CONTEXT_DIR / "feasibility_mapper_governance.md").read_text(),
+        "Pipeline Capabilities": _read("pipeline_capabilities.md"),
+        "Feasibility Mapper Reference": _read("feasibility_mapper_reference.md"),
+        "Ancillary Dataset Inventory": _read("ancillary_dataset_inventory.md"),
+        "Feasibility Mapper Governance": _read("feasibility_mapper_governance.md"),
     }
 
 
 def _load_prithvi_workflow_spec_context() -> dict[str, str]:
     """Load Prithvi Workflow Spec Builder context files."""
     return {
-        "Workflow Spec Builder Reference": (_CONTEXT_DIR / "workflow_spec_builder_reference.md").read_text(),
-        "Workflow Spec Config Schema": (_CONTEXT_DIR / "workflow_spec_config_schema.md").read_text(),
-        "Pipeline Capabilities": (_CONTEXT_DIR / "pipeline_capabilities.md").read_text(),
-        "Ancillary Dataset Inventory": (_CONTEXT_DIR / "ancillary_dataset_inventory.md").read_text(),
-        "Workflow Spec Builder Governance": (_CONTEXT_DIR / "workflow_spec_builder_governance.md").read_text(),
+        "Workflow Spec Builder Reference": _read("workflow_spec_builder_reference.md"),
+        "Workflow Spec Config Schema": _read("workflow_spec_config_schema.md"),
+        "Pipeline Capabilities": _read("pipeline_capabilities.md"),
+        "Ancillary Dataset Inventory": _read("ancillary_dataset_inventory.md"),
+        "Workflow Spec Builder Governance": _read("workflow_spec_builder_governance.md"),
     }
 
 
@@ -217,7 +226,8 @@ class FMPrithviExperimentAnalysisConfig(ExperimentAnalysisConfig):
 class FMPrithviExperimentAnalysisAgent(ExperimentAnalysisAgent):
     """FM_Prithvi_EO-specialized Stage-5 Experiment Analysis Agent.
 
-    Overrides ``_api_key`` to use ``PRITHVI_MCP_API_KEY``.
+    Overrides ``_api_key`` (uses ``PRITHVI_MCP_API_KEY``) and ``_auth_headers``
+    (Prithvi's MCP server uses ``Authorization: Bearer``, not CM1's ``X-API-Key``).
     """
 
     config_schema = FMPrithviExperimentAnalysisConfig
@@ -229,10 +239,52 @@ class FMPrithviExperimentAnalysisAgent(ExperimentAnalysisAgent):
             raise RuntimeError("PRITHVI_MCP_API_KEY is not set; cannot reach the Prithvi MCP.")
         return key
 
+    @property
+    def _auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._api_key}"}
+
 
 # -----------------------------------------------------------------------------
 # Stage 6: Research Report Generator
 # -----------------------------------------------------------------------------
+
+
+class FMPrithviResearchReportGeneratorInputSchema(InputSchema):
+    """Prithvi Stage-6 input.
+
+    Unlike the generic (CM1-style) schema — which takes a ``job_id`` and uses
+    MCP tools to fetch figures itself — Prithvi Stage 6 receives the figures
+    already analyzed by Stage 5, so it needs no ``job_id`` and no tools.
+    """
+
+    research_question: str = Field(
+        default="",
+        description=(
+            "Stage 1 research question / gap analysis output. Contains the "
+            "hypothesis, variables, and evidence from the literature review."
+        ),
+    )
+    workflow_spec: str = Field(
+        ...,
+        description=(
+            "Stage 3 workflow specification markdown: research question, hypothesis, "
+            "experiment matrix, validation plan, feasibility notes."
+        ),
+    )
+    figure_analysis: str = Field(
+        default="",
+        description=(
+            "Stage 5 rendered markdown from ImageAnalyzerAgent — per-figure "
+            "descriptions, inferences, axes, legends, spatial patterns, anomalies."
+        ),
+    )
+    pipeline_text_output: str = Field(
+        default="",
+        description=(
+            "Stage 5 fetched text content — CSV tables, markdown reports, and "
+            "other text artifacts downloaded from the pipeline output URLs."
+        ),
+    )
 
 
 class FMPrithviResearchReportGeneratorConfig(ResearchReportGeneratorConfig):
@@ -248,8 +300,13 @@ class FMPrithviResearchReportGeneratorConfig(ResearchReportGeneratorConfig):
 
 
 class FMPrithviResearchReportGeneratorAgent(ResearchReportGeneratorAgent):
-    """FM_Prithvi_EO Stage-6 Research Report Generator Agent."""
+    """FM_Prithvi_EO Stage-6 Research Report Generator Agent.
 
+    Overrides ``input_schema`` to the Prithvi (no-job_id) contract; the shared
+    generic schema is left intact for CM1's tool-driven Stage 6.
+    """
+
+    input_schema = FMPrithviResearchReportGeneratorInputSchema
     config_schema = FMPrithviResearchReportGeneratorConfig
 
 

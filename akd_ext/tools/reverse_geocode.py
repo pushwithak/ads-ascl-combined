@@ -1,13 +1,13 @@
 """Reverse geocode tool — convert a bbox to a US state / location name.
 
-Uses the free Nominatim (OpenStreetMap) reverse API on the bbox centroid.
-Rate limit: 1 req/sec enforced by sleep.
+Uses the free Nominatim (OpenStreetMap) reverse API on the bbox centroid,
+rate-limited via the shared throttle in ``_nominatim`` (1 req/sec across
+geocode + reverse_geocode).
 """
 
 from __future__ import annotations
 
 import asyncio
-import time
 
 import requests
 from pydantic import ConfigDict, Field
@@ -15,9 +15,9 @@ from pydantic import ConfigDict, Field
 from akd._base import InputSchema, OutputSchema
 from akd.tools import BaseTool, BaseToolConfig
 from akd_ext.mcp import mcp_tool
+from akd_ext.tools._nominatim import nominatim_get
 
 NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
-HEADERS = {"User-Agent": "prithvi-workshop-agent/1.0"}
 
 # US state name → code
 _NAME_TO_CODE: dict[str, str] = {
@@ -95,6 +95,13 @@ class ReverseGeoCodeConfig(BaseToolConfig):
 
 def _reverse_geocode(bbox: list[float]) -> dict:
     """Call Nominatim reverse API on the bbox centroid."""
+    if len(bbox) != 4:
+        return {
+            "message": (
+                f"Expected a bbox of 4 numbers [west, south, east, north], "
+                f"got {len(bbox)}: {bbox}."
+            )
+        }
     west, south, east, north = bbox
     lat = (south + north) / 2
     lon = (west + east) / 2
@@ -107,15 +114,11 @@ def _reverse_geocode(bbox: list[float]) -> dict:
         "addressdetails": 1,
     }
     try:
-        resp = requests.get(
-            NOMINATIM_REVERSE_URL, params=params, headers=HEADERS, timeout=10
-        )
+        resp = nominatim_get(NOMINATIM_REVERSE_URL, params)
         resp.raise_for_status()
         data = resp.json()
     except requests.RequestException as e:
         return {"message": f"Reverse geocoding service unavailable: {e}"}
-    finally:
-        time.sleep(1)  # Nominatim enforces 1 req/sec
 
     if "error" in data:
         return {"message": f"No results for centroid ({lat}, {lon}): {data['error']}"}
