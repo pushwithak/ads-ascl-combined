@@ -586,9 +586,15 @@ class ExperimentAnalysisAgent(
     def _text_only_output(
         fetched_text: str, exp_map: dict[str, list[str]]
     ) -> ExperimentAnalysisOutputSchema:
-        """Output for the no-image case (text artifacts only, no figures)."""
+        """Output for the no-image case (text artifacts only, no figures).
+
+        ``markdown`` is the response channel (__response_field__), so it must be
+        set here too — otherwise a no-figure run returns a blank response.
+        """
+        body = fetched_text or "No figures or data returned by job_plot."
         return ExperimentAnalysisOutputSchema(
-            text_content=fetched_text or "No figures or data returned by job_plot.",
+            text_content=body,
+            markdown=body,
             experiment_map=exp_map,
         )
 
