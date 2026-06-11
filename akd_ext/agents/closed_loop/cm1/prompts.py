@@ -1037,3 +1037,260 @@ For illustrations: leave ``x_axis``, ``y_axis``, and ``legend`` empty.
 - Leave ``url`` empty (``""``). The URL is added programmatically after you
   finish, by mapping ``slug`` → ``url`` from the known URL list.
 """
+
+
+# -----------------------------------------------------------------------------
+# Code Generator Pipeline — CM1 data format context
+# -----------------------------------------------------------------------------
+# The generic prompts live in akd_ext.agents.code_generator (designer.py,
+# generator.py, intent_checker.py).  This block is injected via the
+# `data_format_context` config field — it teaches the LLM how to read
+# CM1's GrADS binary format and what variables are available.
+# -----------------------------------------------------------------------------
+
+CM1_ANALYSIS_METHODOLOGY = """\
+## Hypothesis-Testing for TC Intensification Experiments
+
+This guidance applies when analysing CM1 tropical cyclone simulations \
+where the hypothesis concerns how a perturbation (sounding change, \
+flux change, drag change, etc.) affects storm intensity, structure, \
+or convection. The goal is to **answer the hypothesis**, not just \
+describe the data.
+
+(Scope note: this methodology is specific to TC baselines such as \
+``hurricane_axisymmetric`` and ``hurricane_3d``. Other CM1 \
+configurations — supercell, squall line, LES, RCE — need their own \
+methodology document.)
+
+### Smoothing — Required for CM1 Stats Output
+
+CM1 stats are sampled every model time step. Raw timeseries are very \
+noisy and mask systematic differences between experiments. \
+**Every timeseries figure MUST apply a running mean** (6-hour window \
+recommended). Plot the smoothed curve as the primary line. Optionally \
+show raw data as a faint background (alpha ≤ 0.15).
+
+### Phase-Aware Analysis
+
+TC simulations have distinct phases. Differences between experiments \
+are phase-dependent — a perturbation may matter during rapid \
+intensification but not at steady state.
+
+Key phase metrics to compute for every experiment:
+- **RI onset time**: first time dVmax/dt > 15 m/s per 24 h sustained \
+  for ≥ 3 hours
+- **Time to wind thresholds**: time to reach 33 m/s (TS), 50 m/s \
+  (Cat 2), 70 m/s (Cat 4), etc.
+- **Peak intensity and its timing**: max wspmax and when it occurs
+- **Steady-state window**: period after peak where intensity varies \
+  < 10% — compute mean intensity here
+
+Design a **phase-timing summary figure** (grouped bar or table-figure) \
+comparing these across experiments. This is the most direct test of \
+whether a perturbation accelerates or delays intensification.
+
+### Energy Budget — Explains WHY Intensity Differs
+
+CM1 stats contain ``ek`` (kinetic), ``ei`` (internal), ``ep`` \
+(potential), ``le`` (latent), ``et`` (total energy). Plot these as \
+smoothed timeseries comparing all experiments. Energy partitioning \
+reveals the physical mechanism: more latent energy release → more \
+kinetic energy → stronger storm.
+
+### Moisture Budget — Reveals Convective Pathway
+
+``massqv`` (vapour), ``massqc`` (cloud), ``massqr`` (rain), \
+``massqi`` (ice), ``massqs`` (snow), ``massqg`` (graupel) track the \
+full hydrometeor lifecycle. Differences here show whether the \
+perturbation changes convective efficiency, precipitation type, or \
+total condensation.
+
+Also plot ``train`` (accumulated rainfall) as a cumulative comparison \
+— it integrates total convective activity over time.
+
+### Surface Fluxes
+
+``esfc`` (surface energy flux) and ``qsfc`` (surface moisture flux) \
+drive the storm. If the hypothesis involves air-sea interaction, \
+these must be plotted.
+
+### Storm Structure and Boundary-Layer Metrics
+
+When the hypothesis concerns structure or momentum pathways (RMW \
+shifts, BL jets, convergence/divergence changes):
+- **RMW evolution** (``rmw``, smoothed) for every experiment — \
+  contraction timing often leads the intensity signal.
+- **Vorticity at multiple levels** (``vortsfc`` … ``vort5km``) — \
+  multi-panel figure, one panel per level, all experiments overlaid.
+- **BL proxies**: ``hpblmax`` (PBL depth) and ``zwmax`` (height of \
+  max updraft) — shifts here indicate altered BL structure.
+- Structural responses often **precede** intensity responses. Pair \
+  structure and intensity timeseries on aligned time axes so lead/lag \
+  between them is visible — that ordering is frequently the hypothesis \
+  test itself.
+
+### CAPE/CIN from Spatial Fields (if present)
+
+CAPE and CIN, **when the namelist enables them**, are in ``cm1out_s`` \
+(spatial), NOT ``cm1out_stats``. For axisymmetric (ny=1): reduce to a \
+timeseries by taking the **domain-maximum** CAPE at each time step \
+(``np.max`` over x-axis). Parse the ``cm1out_s.ctl`` VARS block to \
+find CAPE/CIN, compute the byte offset, and read only those variables.
+
+They are frequently absent — some experiment sets do not write them \
+at all. Any CAPE/CIN figure and any success criterion about it MUST \
+be **conditional**: "if cape/cin exist in cm1out_s, produce X; \
+otherwise skip with a WARNING." Never write an unconditional CAPE/CIN \
+success criterion.
+
+### Bar Chart and Summary Figure Best Practices
+
+When peak metrics are similar across experiments (e.g., all ~900 hPa):
+- Do NOT start y-axis at 0 — the differences become invisible.
+- Use a **zoomed y-axis** showing only the range of variation, OR
+- Show **difference from baseline** as bars (ΔV, ΔP).
+- Grouped bars with experiment colors are preferred over separate panels.
+
+### Hypothesis-Testing vs Descriptive Figures
+
+- **Descriptive**: "max wind timeseries for each experiment" — \
+  necessary context but does not directly test the hypothesis.
+- **Hypothesis-testing**: "time to reach Cat 3 for each experiment", \
+  "peak intensification rate comparison", "energy budget evolution" \
+  — these directly answer whether the perturbation had the predicted \
+  effect.
+- Design BOTH, but **the majority of figures should be hypothesis-testing**.
+- Per-experiment dashboards are descriptive only — limit to 0 or 1. \
+  Comparative figures are always preferred.
+
+### Anomaly Plots
+
+When computing experiment − baseline anomalies:
+- Do NOT include the baseline line (it is zero by definition).
+- Only show perturbation experiments.
+- Smoothing is even more critical here — raw anomalies are very noisy.
+
+### Expected Figure Set for a TC Hypothesis Test
+
+A complete TC comparison normally includes ALL of:
+1. Intensity timeseries (``wspmax`` + ``psfcmin``, smoothed, all \
+   experiments)
+2. Intensity anomalies vs baseline
+3. Phase-timing summary (RI onset, threshold times, peak timing)
+4. Structure timeseries (``rmw``, ``hpblmax``, ``zwmax``; vorticity \
+   levels when the hypothesis involves rotation)
+5. Structure anomalies vs baseline (when the hypothesis concerns \
+   structure)
+6. Energy budget timeseries
+7. Moisture budget timeseries + accumulated ``train``
+8. Surface flux timeseries AND flux anomalies
+9. CAPE/CIN domain-max (conditional — only if present in ``cm1out_s``)
+
+Omit an item only when the hypothesis clearly makes it irrelevant. \
+The energy and moisture budgets are mechanism evidence for almost \
+every intensity hypothesis — they are almost never irrelevant.
+"""
+
+CM1_DATA_FORMAT_CONTEXT = """\
+## CM1 GrADS Binary Data Format
+
+Each experiment directory contains GrADS CTL/DAT file pairs. CTL is a \
+text file defining grid dimensions, coordinates, and variable layout. \
+DAT is flat binary (little-endian float32, ``dtype='<f4'``).
+
+### Output files
+
+| File pair | Contents |
+|-----------|----------|
+| ``cm1out_stats.*`` | Scalar statistics per time step (1×1×1 per var) |
+| ``cm1out_s.*`` | Scalar fields — surface (nlev=0) and 3D (nlev=nz) mixed |
+| ``cm1out_u/v/w.*`` | Velocity components — may be on staggered grids |
+| ``cm1out_metadata.*`` | Model time (``mtime`` in seconds), nstep, dt |
+
+Not all files exist in every experiment. Discover at runtime.
+
+### Variable names and units
+
+Variables are stored in **native CM1 units**. The code MUST convert \
+to standard meteorological units for all plotted values and axis labels.
+
+| Variable | CM1 name | Native unit | Plot unit | Conversion |
+|----------|----------|-------------|-----------|------------|
+| Max wind speed | ``wspmax`` | m/s | m/s | none |
+| 10-m wind | ``wsp10max`` | m/s | m/s | none |
+| Min sfc pressure | ``psfcmin`` | Pa | hPa | ÷ 100 |
+| Max sfc pressure | ``psfcmax`` | Pa | hPa | ÷ 100 |
+| Pressure pert. | ``ppmin``, ``ppmax`` | Pa | hPa | ÷ 100 |
+| RMW | ``rmw`` | m | km | ÷ 1000 |
+| Vertical velocity | ``wmax``, ``wmin`` | m/s | m/s | none |
+| Height of max w | ``zwmax`` | m AGL | km | ÷ 1000 |
+| PBL height | ``hpblmax``, ``hpblmin`` | m | km | ÷ 1000 |
+| Potential temp | ``themax``, ``themin`` | K | K | none |
+| Theta-e | ``sthemax``, ``sthemin`` | K | K | none |
+| Vorticity | ``vortsfc``–``vort5km`` | 1/s | ×10⁻³ s⁻¹ | × 1000 |
+| CAPE | ``cape`` (cm1out_s, if present) | J/kg | J/kg | none |
+| CIN | ``cin`` (cm1out_s, if present) | J/kg | J/kg | none |
+| Model time | ``mtime`` | seconds | hours | ÷ 3600 |
+
+Always label axes with the **plot unit**, not "native".
+
+**Variable availability varies between runs** — which variables CM1 \
+writes depends on namelist output flags, so two experiment sets can \
+have different inventories (e.g. ``cape``/``cin`` present in one and \
+absent in another). ALWAYS parse the VARS block and check a variable \
+exists before reading it; treat missing variables as a skip-with-WARNING, \
+never as an error.
+
+### Grid geometry
+
+Determine from CTL at runtime — do NOT hardcode:
+- **ny ≤ 2**: a 2D run. For axisymmetric configurations (e.g. \
+  hurricane), x = radius; for 2D slab configurations (e.g. squall \
+  line), x = horizontal distance. The task context says which applies \
+  — label axes accordingly.
+- **3D Cartesian** (ny >> 1): x, y = horizontal, z = height
+
+### Reading CTL/DAT
+
+**CTL structure**: Parse with regex — ``XDEF/YDEF/ZDEF`` give dimension \
+sizes and coordinates (``LINEAR start incr`` or explicit ``LEVELS`` on \
+following lines). ``TDEF n`` gives time step count. ``VARS...ENDVARS`` \
+block lists variables as ``name nlev 99 description (unit)``.
+
+**Key patterns:**
+- ``DSET ^filename`` — ``^`` means relative to CTL directory
+- Stats (1×1×1): ``raw = np.fromfile(dat, dtype='<f4'); \
+data = raw[:nt*nvars].reshape(nt, nvars)`` → dict of 1D arrays
+- 3D fields: one time step = all vars written sequentially, each var \
+as ``nx × ny × max(nlev,1)`` floats. Surface vars (nlev=0) are \
+written as 1 level.
+- Time: read ``mtime`` from ``cm1out_metadata.dat``; divide by 3600 \
+for hours. Fallback: stats ``mtime``, then index-based.
+
+### Gotchas
+
+- **Staggered grids**: u/v/w files may have nx+1, ny+1, nz+1 points. \
+Trim coordinates to match data shape.
+- **Mixed nlev in cm1out_s**: surface vars occupy nx×ny×1 floats, \
+3D vars occupy nx×ny×nz. The reader must handle both.
+- **Large 3D files**: ``cm1out_s``/``u``/``v``/``w`` can be hundreds \
+of MB — read only the needed variables from these. ``cm1out_stats`` \
+files are tiny (≈100 KB): reading them whole with ``np.fromfile`` is \
+the normal, correct pattern.
+
+### Directory layout
+
+Experiments are subdirectories under ``--input-dir``, discovered by \
+scanning for ``cm1out_stats.ctl`` (directory names vary — do not match \
+on name patterns):
+```
+--input-dir/
+  exp_<tag>_baseline/   cm1out_stats.ctl/.dat  cm1out_s.ctl/.dat  ...
+  exp_<tag>_low_Cd/     (same structure)
+  exp_<tag>_high_Cd/    (same structure)
+```
+
+The **baseline** experiment is identified by the substring "baseline" \
+in its directory name (match case-insensitively). All anomaly \
+computations use it as the reference.
+"""
