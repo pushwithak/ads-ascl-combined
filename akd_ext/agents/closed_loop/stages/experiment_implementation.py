@@ -95,6 +95,15 @@ class ExperimentImplementationInputSchema(InputSchema):
     stage_3_spec: str = Field(
         ..., description="Stage-3 workflow specification markdown with experiment matrix and control definition."
     )
+    config: str = Field(
+        default="",
+        description=(
+            "Optional standalone pipeline config from Stage 3 (YAML, JSON, or any format). "
+            "When provided, use this directly instead of extracting the config from the "
+            "markdown spec. The spec is still provided for context (RQ, design narrative, "
+            "validation plan)."
+        ),
+    )
 
 
 class ExperimentImplementationOutputSchema(OutputSchema):
