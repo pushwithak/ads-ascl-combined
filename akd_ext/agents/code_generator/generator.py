@@ -10,11 +10,17 @@ output files, and an explanation.
 
 from __future__ import annotations
 
+import ast
 from typing import Any
 
 from pydantic import Field
 
 from akd_ext.agents._base import PydanticAIBaseAgent, PydanticAIBaseAgentConfig
+from akd_ext.agents.code_generator._prompt import (
+    DATA_FORMAT_CONTEXT_DESC,
+    assemble_prompt,
+    section,
+)
 from akd_ext.agents.code_generator.validator import ALLOWED_IMPORTS
 from akd_ext.agents.code_generator.schemas import (
     CodeGeneratorInputSchema,
@@ -56,9 +62,9 @@ that implements it exactly.
 
 ## YOUR JOB
 
-Translate the design document into a single Python file. Follow the \
-WORKFLOW section step-by-step and honor every CONSTRAINT. Respect every \
-best practice listed in the design document.
+Translate the design document into a single Python **plot module**. \
+Follow the WORKFLOW section step-by-step and honor every CONSTRAINT. \
+Respect every best practice listed in the design document.
 
 ---
 
@@ -71,23 +77,20 @@ best practice listed in the design document.
 - **Descriptive names** — no single-letter variables except loop indices.
 - **pathlib.Path** for all file operations. NOT ``os.path``.
 - **try/except** around all I/O with informative error messages.
-- **Graceful degradation** — if an input file is missing or corrupt, \
-  log a warning and skip it. Don't crash.
-- **Path containment** — read only inside ``--input-dir``, write only \
-  inside ``--output-dir``. Paths referenced *inside* data files (e.g. a \
-  binary-file path declared in a header/metadata file) must be resolved \
-  relative to the file that declares them — never follow absolute \
-  paths. Log a WARNING and skip anything pointing outside \
-  ``--input-dir``.
-- **CLI interface** — use ``argparse`` with exactly TWO arguments \
-  (names and count are non-negotiable):
-  - ``--input-dir`` — path to input data directory.
-  - ``--output-dir`` — path to output directory for all results.
-  Do NOT add any other CLI arguments. All parameters (thresholds, \
-  regex patterns, window sizes, flags) must be defined as constants \
-  at the top of the script. The user runs the script with only \
-  ``--input-dir`` and ``--output-dir`` — nothing else.
-- ``if __name__ == '__main__': main()`` entry point.
+- **Graceful degradation** — if an expected variable or series is \
+  missing from the provided data, log a console WARNING and skip the \
+  affected figure. Don't crash.
+- **Module contract** — your output is a **plot module** executed by a \
+  fixed harness. It MUST define exactly one entrypoint:
+  ``def generate_figures(data, output_dir):`` where ``data`` is the \
+  pre-loaded experiment data (described in the data interface reference) \
+  and ``output_dir`` is a ``pathlib.Path``. The harness owns the CLI, \
+  file discovery, data parsing, and unit conversion — your module does \
+  NONE of that.
+- **No file I/O** — do not read any files and do not use ``argparse``. \
+  The only filesystem effect is saving figures under ``output_dir``.
+- All parameters (thresholds, window sizes, colors, flags) must be \
+  defined as named constants at the top of the module.
 
 ---
 
@@ -144,11 +147,6 @@ Read the feedback carefully and fix the SPECIFIC issues described:
 # Prompt assembly & validation
 # ---------------------------------------------------------------------------
 
-_DATA_FORMAT_CONTEXT_DESC = (
-    "Domain-specific data format description appended to the system "
-    "prompt. Code examples for reading specific file formats, etc."
-)
-
 _FORBIDDEN_EXAMPLES = [
     "os", "sys", "subprocess", "shutil", "socket", "ssl",
     "urllib", "requests", "httpx", "http", "ftplib", "smtplib",
@@ -156,27 +154,20 @@ _FORBIDDEN_EXAMPLES = [
     "multiprocessing", "threading", "importlib",
 ]
 
+_GENERATOR_FORBIDDEN = (
+    "\n\n**FORBIDDEN** (the validator will reject your code):\n"
+    + ", ".join(_FORBIDDEN_EXAMPLES)
+    + "\n\nAlso forbidden: eval(), exec(), compile(), __import__()."
+)
+
 
 def _assemble_generator_prompt(config: Any) -> str:
     """Build the full system prompt from config fields."""
-    parts = [config.system_prompt]
-
-    allowed = sorted(ALLOWED_IMPORTS)
-    parts.append(
-        "\n\n---\n\n## ALLOWED LIBRARIES\n\n"
-        + ", ".join(allowed)
-        + "\n\n**FORBIDDEN** (the validator will reject your code):\n"
-        + ", ".join(_FORBIDDEN_EXAMPLES)
-        + "\n\nAlso forbidden: eval(), exec(), compile(), __import__()."
+    return assemble_prompt(
+        config.system_prompt,
+        section("ALLOWED LIBRARIES", ", ".join(sorted(ALLOWED_IMPORTS)) + _GENERATOR_FORBIDDEN),
+        section("DATA FORMAT REFERENCE", getattr(config, "data_format_context", "")),
     )
-
-    if getattr(config, "data_format_context", "").strip():
-        parts.append(
-            "\n\n---\n\n## DATA FORMAT REFERENCE\n\n"
-            + config.data_format_context.strip()
-        )
-
-    return "".join(parts)
 
 
 def _validate_generator_output(output: Any) -> str | None:
@@ -200,39 +191,54 @@ def _validate_generator_output(output: Any) -> str | None:
             f"Choose only from: {', '.join(sorted(ALLOWED_IMPORTS))}"
         )
 
-    if "--input-dir" not in code:
+    # Structural checks use the AST, not substring matching: a docstring or
+    # comment that merely mentions "generate_figures" or "argparse" must not
+    # false-pass or false-reject (raw `in`/`.count()` heuristics did both).
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
         return (
-            "code is missing mandatory --input-dir argument. "
-            "Every script must accept --input-dir and --output-dir."
-        )
-    if "--output-dir" not in code:
-        return (
-            "code is missing mandatory --output-dir argument. "
-            "Every script must accept --input-dir and --output-dir."
-        )
-
-    # Enforce exactly 2 CLI arguments — no extras allowed
-    add_arg_count = code.count("add_argument(")
-    if add_arg_count > 2:
-        return (
-            f"code defines {add_arg_count} CLI arguments but only 2 are "
-            "allowed (--input-dir and --output-dir). All other parameters "
-            "must be defined as constants at the top of the script, not "
-            "as CLI arguments."
+            f"code has a syntax error: {exc.msg} (line {exc.lineno}). "
+            "Fix it and regenerate complete, parseable source."
         )
 
-    if "def " not in code:
+    has_entrypoint = any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "generate_figures"
+        for node in tree.body
+    )
+    if not has_entrypoint:
         return (
-            "code has no function definitions. Generate modular code "
-            "with functions, not a bare script."
+            "code is missing the mandatory entrypoint "
+            "`def generate_figures(data, output_dir):`. The plot module "
+            "is executed by a fixed harness that calls exactly this "
+            "function (it must be defined at module level)."
         )
 
-    if 'if __name__' not in code:
+    if _imports_argparse(tree):
         return (
-            "code is missing `if __name__ == '__main__':` entry point. "
-            "Every script must have a guarded main entry point."
+            "code imports argparse, but plot modules have no CLI — the "
+            "fixed harness owns argument parsing. Remove the argparse "
+            "import; parameters belong in named constants at the top of "
+            "the module."
         )
     return None
+
+
+def _imports_argparse(tree: ast.AST) -> bool:
+    """True only if the module actually imports argparse (AST, not substring).
+
+    A comment or docstring mentioning argparse won't trip this; only a real
+    ``import argparse`` / ``from argparse import ...`` does.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name.split(".")[0] == "argparse" for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "").split(".")[0] == "argparse":
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +254,7 @@ class CodeGeneratorConfig(PydanticAIBaseAgentConfig):
         description="Base system prompt. data_format_context is appended at runtime.",
     )
     model_name: str = Field(default="openai:gpt-5.2")
-    data_format_context: str = Field(default="", description=_DATA_FORMAT_CONTEXT_DESC)
+    data_format_context: str = Field(default="", description=DATA_FORMAT_CONTEXT_DESC)
 
 
 # ---------------------------------------------------------------------------

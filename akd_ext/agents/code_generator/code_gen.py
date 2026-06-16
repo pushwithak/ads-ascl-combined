@@ -21,6 +21,7 @@ final output, so there is exactly one copy of the loop.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
@@ -63,6 +64,7 @@ from akd_ext.agents.code_generator.validator import (
     IntentCheckerConfig,
     check_allowlist,
     check_bandit,
+    severity_rank,
 )
 
 __all__ = [
@@ -154,7 +156,7 @@ class CodeGeneratorPipeline(
                 reasons.extend(
                     f"bandit {f.severity}/{f.confidence} line {f.line}: {f.issue}"
                     for f in bd.findings
-                    if _sev_rank(f.severity) >= _sev_rank(self.config.bandit_fail_on)
+                    if severity_rank(f.severity) >= severity_rank(self.config.bandit_fail_on)
                 )
 
         return ValidationResult(
@@ -199,8 +201,8 @@ class CodeGeneratorPipeline(
 
         The orchestration loop is implemented exactly once, in
         ``_astream``. Batch mode consumes the events and keeps only the
-        ``CompletedEvent`` payload; progress is still visible through the
-        ``logger`` calls inside the stream.
+        ``CompletedEvent`` payload; progress is carried by the
+        ``RunningEvent`` stream (internal diagnostics log at DEBUG).
         """
         final: CodeGeneratorPipelineOutputSchema | TextOutput | None = None
         async for event in self._astream(params, run_context, **kwargs):
@@ -227,29 +229,48 @@ class CodeGeneratorPipeline(
             run_context=run_context,
         )
 
-        # 1. Design. Structural validation + retry happen inside arun():
+        # 1. Design. When the caller supplies a pre-approved design
+        #    (human-in-the-loop flows), the internal designer is skipped.
+        #    Otherwise structural validation + retry happen inside arun():
         #    the agent's check_output is registered as a pydantic_ai output
         #    validator, so invalid designs are retried before this returns.
-        yield RunningEvent(source=cn, message="Producing design document…", run_context=run_context)
-
-        designer = self._make_designer()
-        plan_output = await designer.arun(params.to_designer_input())
-
-        if not isinstance(plan_output, CodeDesignerOutputSchema):
-            final = TextOutput(content=f"Designer failed: {plan_output}")
-            yield CompletedEvent(
-                source=cn, message=f"Completed {cn}",
-                data=CompletedEventData(output=final), run_context=run_context,
+        if params.design_document.strip():
+            design_doc = params.design_document
+            success_criteria = params.success_criteria
+            logger.debug("[CodeGenPipeline] using pre-approved design document — designer skipped")
+            yield RunningEvent(
+                source=cn,
+                message=f"Using pre-approved design document ({len(success_criteria)} success criteria) — designer skipped",
+                run_context=run_context,
             )
-            return
+        else:
+            yield RunningEvent(source=cn, message="Producing design document…", run_context=run_context)
 
-        design_doc = plan_output.design_document
-        success_criteria = plan_output.success_criteria
-        yield RunningEvent(
-            source=cn,
-            message=f"Design document ready ({len(plan_output.libraries)} libraries, {len(plan_output.output_files)} outputs, {len(success_criteria)} success criteria)",
-            run_context=run_context,
-        )
+            designer = self._make_designer()
+            try:
+                plan_output = await designer.arun(params.to_designer_input())
+            except Exception as exc:  # noqa: BLE001 — never let the stream die without a final event
+                logger.exception("[CodeGenPipeline] designer raised")
+                plan_output = None
+                designer_error: str | None = f"Designer raised an error: {exc}"
+            else:
+                designer_error = None
+
+            if designer_error is not None or not isinstance(plan_output, CodeDesignerOutputSchema):
+                final = TextOutput(content=designer_error or f"Designer failed: {plan_output}")
+                yield CompletedEvent(
+                    source=cn, message=f"Completed {cn}",
+                    data=CompletedEventData(output=final), run_context=run_context,
+                )
+                return
+
+            design_doc = plan_output.design_document
+            success_criteria = plan_output.success_criteria
+            yield RunningEvent(
+                source=cn,
+                message=f"Design document ready ({len(plan_output.libraries)} libraries, {len(plan_output.output_files)} outputs, {len(success_criteria)} success criteria)",
+                run_context=run_context,
+            )
 
         # 2. Generate + validation loop. The agents are stateless — build
         #    them once, not per attempt.
@@ -261,20 +282,38 @@ class CodeGeneratorPipeline(
         attempt_history: list[AttemptRecord] = []
 
         for attempt in range(1, self.config.max_retries + 1):
-            logger.info(f"[CodeGenPipeline] attempt {attempt}/{self.config.max_retries}")
+            logger.debug(f"[CodeGenPipeline] attempt {attempt}/{self.config.max_retries}")
             yield RunningEvent(
                 source=cn,
                 message=f"Generating code (attempt {attempt}/{self.config.max_retries})…",
                 run_context=run_context,
             )
 
-            gen_output = await generator.arun(
-                CodeGeneratorInputSchema(
-                    design_document=design_doc,
-                    context=params.context,
-                    correction_feedback=correction_feedback,
-                ),
-            )
+            try:
+                gen_output = await generator.arun(
+                    CodeGeneratorInputSchema(
+                        design_document=design_doc,
+                        context=params.context,
+                        correction_feedback=correction_feedback,
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 — feed the error into the retry loop
+                last_reason = f"generator raised: {exc}"
+                correction_feedback = (
+                    "The previous attempt errored before producing code: "
+                    f"{exc}. Regenerate complete, valid output."
+                )
+                attempt_history.append(AttemptRecord(
+                    attempt=attempt, stage_failed="generator",
+                    failure_reason=last_reason[:200],
+                ))
+                logger.warning(f"[CodeGenPipeline] attempt {attempt} generator raised: {exc}")
+                yield RunningEvent(
+                    source=cn,
+                    message=f"Attempt {attempt}: generator error — {str(exc)[:120]}",
+                    run_context=run_context,
+                )
+                continue
             if not isinstance(gen_output, CodeGeneratorOutputSchema):
                 correction_feedback = f"Generator returned unexpected output: {gen_output}"
                 last_reason = correction_feedback
@@ -289,7 +328,10 @@ class CodeGeneratorPipeline(
             # 3a. Deterministic validators
             yield RunningEvent(source=cn, message=f"Running validators (attempt {attempt})…", run_context=run_context)
 
-            det = self._run_deterministic_validators(gen_output.code)
+            # bandit shells out via blocking subprocess.run (up to 30s); run it
+            # off the event loop so concurrent coroutines/clients aren't frozen
+            # — critical in the async FastMCP-served environment.
+            det = await asyncio.to_thread(self._run_deterministic_validators, gen_output.code)
             if not det.passed:
                 correction_feedback = (
                     "The previous code failed validation. Fix these issues:\n"
@@ -312,14 +354,31 @@ class CodeGeneratorPipeline(
             # 3b. LLM intent checker (with structured success criteria)
             yield RunningEvent(source=cn, message=f"Intent check (attempt {attempt})…", run_context=run_context)
 
-            verdict = await intent_checker.arun(
-                IntentCheckerInputSchema(
-                    context=params.context,
-                    design_document=design_doc,
-                    code=gen_output.code,
-                    success_criteria=success_criteria,
-                ),
-            )
+            try:
+                verdict = await intent_checker.arun(
+                    IntentCheckerInputSchema(
+                        context=params.context,
+                        design_document=design_doc,
+                        code=gen_output.code,
+                        success_criteria=success_criteria,
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 — feed the error into the retry loop
+                last_reason = f"intent checker raised: {exc}"
+                correction_feedback = (
+                    f"The intent check errored: {exc}. Regenerate the code."
+                )
+                attempt_history.append(AttemptRecord(
+                    attempt=attempt, stage_failed="intent",
+                    failure_reason=last_reason[:200],
+                ))
+                logger.warning(f"[CodeGenPipeline] attempt {attempt} intent checker raised: {exc}")
+                yield RunningEvent(
+                    source=cn,
+                    message=f"Attempt {attempt}: intent check error — {str(exc)[:120]}",
+                    run_context=run_context,
+                )
+                continue
             if not isinstance(verdict, IntentCheckerOutputSchema):
                 correction_feedback = f"Intent checker returned unexpected output: {verdict}"
                 last_reason = correction_feedback
@@ -350,6 +409,28 @@ class CodeGeneratorPipeline(
                 )
                 continue
 
+            # Final guard before approving: never return an "approved" result
+            # with empty code. This runs inline (the pipeline overrides
+            # _arun/_astream, so the base's check_output machinery never fires)
+            # and routes an empty result back through the retry loop.
+            if not gen_output.code.strip():
+                correction_feedback = (
+                    "All checks passed but the code field is empty. Regenerate "
+                    "complete, self-contained source."
+                )
+                last_reason = "approved output had empty code"
+                attempt_history.append(AttemptRecord(
+                    attempt=attempt, stage_failed="generator",
+                    failure_reason=last_reason,
+                ))
+                logger.warning(f"[CodeGenPipeline] attempt {attempt} empty code after validation")
+                yield RunningEvent(
+                    source=cn,
+                    message=f"Attempt {attempt}: approved output had empty code — retrying",
+                    run_context=run_context,
+                )
+                continue
+
             # All validators passed
             attempt_history.append(AttemptRecord(
                 attempt=attempt, passed=True,
@@ -372,7 +453,6 @@ class CodeGeneratorPipeline(
                 ),
                 design_document=design_doc,
                 attempt_history=attempt_history,
-                total_attempts=attempt,
             )
             yield CompletedEvent(
                 source=cn, message=f"Completed {cn}",
@@ -394,28 +474,8 @@ class CodeGeneratorPipeline(
             ),
             design_document=design_doc,
             attempt_history=attempt_history,
-            total_attempts=self.config.max_retries,
         )
         yield CompletedEvent(
             source=cn, message=f"Completed {cn}",
             data=CompletedEventData(output=final_output), run_context=run_context,
         )
-
-    # -- Output validation -------------------------------------------------
-
-    def check_output(self, output) -> str | None:
-        if isinstance(output, CodeGeneratorPipelineOutputSchema):
-            if not output.rejected and output.vetted_code and not output.vetted_code.code.strip():
-                return "Pipeline approved but vetted_code.code is empty."
-        return super().check_output(output)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_SEV = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
-
-
-def _sev_rank(s: str) -> int:
-    return _SEV.get(s.upper(), 0)

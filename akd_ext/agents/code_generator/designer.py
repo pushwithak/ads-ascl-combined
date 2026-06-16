@@ -11,11 +11,17 @@ with targeted feedback.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from pydantic import Field
 
 from akd_ext.agents._base import PydanticAIBaseAgent, PydanticAIBaseAgentConfig
+from akd_ext.agents.code_generator._prompt import (
+    DATA_FORMAT_CONTEXT_DESC,
+    assemble_prompt,
+    section,
+)
 from akd_ext.agents.code_generator.validator import ALLOWED_IMPORTS
 from akd_ext.agents.code_generator.schemas import (
     CodeDesignerInputSchema,
@@ -25,6 +31,7 @@ from akd_ext.agents.code_generator.schemas import (
 __all__ = [
     "CodeDesignerAgent",
     "CodeDesignerConfig",
+    "render_figure_plan",
 ]
 
 
@@ -131,16 +138,13 @@ What the code must NOT do. Anti-requirements and correctness boundaries.
 
 Always include:
 - Do NOT silently drop, fabricate, or modify input data — warn and skip
-- Do NOT hardcode dataset-specific values (file counts, column names, \
-  directory names) — discover them at runtime
-- Do NOT assume a fixed number of input files or a fixed schema — be \
-  adaptive
-- **Path containment**: all reads stay inside ``--input-dir`` and all \
-  writes stay inside ``--output-dir``. Paths referenced *inside* data \
-  files (e.g., a binary-file path declared in a metadata/header file) \
-  must be resolved relative to the file that declares them — never \
-  follow absolute paths. If a reference points outside ``--input-dir``, \
-  log a WARNING and skip it.
+- Do NOT hardcode dataset-specific values (experiment names, variable \
+  counts) — discover them from the provided data at runtime
+- Do NOT assume a fixed number of experiments or a fixed variable \
+  inventory — be adaptive
+- **No file I/O**: the module reads nothing from disk — all inputs come \
+  from the provided ``data`` object. The only filesystem effect is \
+  saving figures under ``output_dir``.
 
 Add any task-specific constraints relevant to the context.
 
@@ -152,21 +156,25 @@ verifier does not enforce such constraints.
 
 ### 5. INPUT / OUTPUT SPECIFICATION
 
-**Mandatory CLI contract** — every generated script MUST use ``argparse`` \
-with exactly TWO arguments (no more, no less):
-- ``--input-dir`` — path to the directory containing input data. The script \
-  discovers what it needs inside this directory at runtime.
-- ``--output-dir`` — path to the directory where ALL outputs are written.
+**Mandatory module contract** — the generated code is a **plot module** \
+executed by a fixed harness. It MUST define exactly one entrypoint:
 
-Do NOT specify any additional CLI arguments. All parameters (thresholds, \
-regex patterns, window sizes, constants, flags) must be hardcoded as \
-named constants at the top of the script. The script must be runnable \
-with only ``--input-dir`` and ``--output-dir``.
+``def generate_figures(data, output_dir):``
+
+- ``data`` — pre-loaded experiment data. Its exact structure is described \
+  in the data interface reference appended below; design strictly \
+  against that interface.
+- ``output_dir`` — a ``pathlib.Path`` where every figure is written.
+
+There is NO CLI and NO file reading — the harness owns discovery, \
+parsing, and unit conversion. All parameters (thresholds, window sizes, \
+constants, flags) must be hardcoded as named constants at the top of \
+the module.
 
 For this section, specify:
-- **Inputs**: What files/subdirectories the script expects inside \
-  ``--input-dir``, their format, and their layout.
-- **Outputs**: Every file the script writes inside ``--output-dir``. \
+- **Inputs**: Which variables/series from the data interface the module \
+  uses, and how missing ones are handled (skip + WARNING).
+- **Outputs**: Every figure file written inside ``output_dir``. \
   Filenames, format, content.
 
 **The deliverables are figures.** Do NOT specify manifests, run-log \
@@ -182,13 +190,12 @@ set (appended below). For each library, state what it's used for: \
 
 ### 7. BEST PRACTICES
 Specific coding rules the generator must follow:
-- Single self-contained file, no external dependencies
-- Use ``pathlib.Path`` for all file operations (NOT ``os.path``)
-- Wrap all I/O in try/except with informative error messages
+- Single self-contained module, no dependencies beyond the allowed set
 - Use type hints on function signatures
 - Use descriptive variable names
 - Add docstrings to every function
-- Handle missing or corrupt input files gracefully (warn + skip)
+- Check availability before using any variable/series from the data \
+  interface; handle missing data gracefully (console WARNING + skip)
 - Any task-specific practices relevant to the context
 
 ### 8. VISUALISATION SPECIFICATIONS (if the task produces plots)
@@ -235,6 +242,13 @@ For each figure, specify:
 - **Purpose**: why this figure matters for answering the task's question
 - **Computation**: if a derived field is needed, specify the formula
 
+**Also populate the structured ``figures`` field** — one entry per \
+figure with ``filename``, ``shows`` (one sentence), and ``purpose`` \
+(one sentence). This is what the reviewing scientist reads to approve \
+or reject the plan, so each ``purpose`` must state, in plain language, \
+how that figure helps accept or reject the hypothesis — not just \
+describe the plot.
+
 ### 9. EDGE CASES & GOTCHAS
 What could go wrong? What should the code handle?
 - Missing files or empty directories
@@ -250,9 +264,8 @@ What could go wrong? What should the code handle?
 
 - Be **thorough on outputs, concise on boilerplate**. The visualisation \
   and I/O sections should be exhaustive. The workflow and best practices \
-  sections should be brief — the generator knows how to write argparse \
-  and try/except.
-- Be **precise** where it counts. Data formats, file layouts, formulas, \
+  sections should be brief — the generator is a competent programmer.
+- Be **precise** where it counts. The data interface, formulas, \
   and domain knowledge that the generator wouldn't know on its own.
 - Be **correct**. Think through the logic. If a step would fail, \
   fix it before writing it down.
@@ -275,19 +288,30 @@ What could go wrong? What should the code handle?
 # Shared prompt assembly & validation
 # ---------------------------------------------------------------------------
 
-_REQUIRED_SECTIONS = (
-    "GOAL",
-    "APPROACH",
-    "WORKFLOW",
-    "CONSTRAINTS",
-    "INPUT",       # matches INPUT / OUTPUT or INPUT/OUTPUT
-    "LIBRARIES",
+# Markdown ATX header lines only (e.g. "### 1. GOAL & SUCCESS CRITERIA").
+# Section presence is checked against these headers, NOT the whole doc, so a
+# keyword that merely appears in prose can't vacuously satisfy a section.
+_HEADER_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+)$", re.MULTILINE)
+
+# Each required section is a group of accepted header keywords, so a
+# structurally-complete doc isn't false-rejected over exact wording
+# (e.g. "OBJECTIVE" instead of "GOAL"). LIBRARIES is intentionally absent —
+# it's validated directly via the structured ``output.libraries`` field below,
+# not by scanning the prose.
+_REQUIRED_SECTIONS: tuple[tuple[str, ...], ...] = (
+    ("GOAL", "OBJECTIVE", "PURPOSE"),
+    ("APPROACH", "METHOD", "METHODOLOGY", "STRATEGY"),
+    ("WORKFLOW", "STEPS", "PROCEDURE", "PIPELINE"),
+    ("CONSTRAINTS", "REQUIREMENTS", "RULES"),
+    ("INPUT", "OUTPUT", "I/O"),
 )
 
-_DATA_FORMAT_CONTEXT_DESC = (
-    "Domain-specific data format description appended to the system "
-    "prompt. Describes file formats, variable inventories, directory "
-    "structure, and reading patterns."
+_DESIGNER_FORBIDDEN = (
+    "\n\nForbidden: networking (requests, urllib, socket, http), "
+    "system access (os, sys, subprocess, shutil), "
+    "serialisation (pickle, shelve, marshal), "
+    "dynamic execution (eval, exec, compile, __import__), "
+    "low-level (ctypes, cffi), concurrency (multiprocessing, threading)."
 )
 
 _ANALYSIS_METHODOLOGY_DESC = (
@@ -300,32 +324,12 @@ _ANALYSIS_METHODOLOGY_DESC = (
 
 def _assemble_designer_prompt(config: "CodeDesignerConfig") -> str:
     """Build the full system prompt from config fields."""
-    parts = [config.system_prompt]
-
-    libs_sorted = sorted(ALLOWED_IMPORTS)
-    parts.append(
-        "\n\n---\n\n## ALLOWED LIBRARIES\n\n"
-        + ", ".join(libs_sorted)
-        + "\n\nForbidden: networking (requests, urllib, socket, http), "
-        "system access (os, sys, subprocess, shutil), "
-        "serialisation (pickle, shelve, marshal), "
-        "dynamic execution (eval, exec, compile, __import__), "
-        "low-level (ctypes, cffi), concurrency (multiprocessing, threading)."
+    return assemble_prompt(
+        config.system_prompt,
+        section("ALLOWED LIBRARIES", ", ".join(sorted(ALLOWED_IMPORTS)) + _DESIGNER_FORBIDDEN),
+        section("DATA FORMAT REFERENCE", config.data_format_context),
+        section("SCIENTIFIC ANALYSIS METHODOLOGY", config.analysis_methodology),
     )
-
-    if config.data_format_context.strip():
-        parts.append(
-            "\n\n---\n\n## DATA FORMAT REFERENCE\n\n"
-            + config.data_format_context.strip()
-        )
-
-    if config.analysis_methodology.strip():
-        parts.append(
-            "\n\n---\n\n## SCIENTIFIC ANALYSIS METHODOLOGY\n\n"
-            + config.analysis_methodology.strip()
-        )
-
-    return "".join(parts)
 
 
 def _validate_designer_output(output: Any) -> str | None:
@@ -343,14 +347,15 @@ def _validate_designer_output(output: Any) -> str | None:
             "INPUT/OUTPUT, LIBRARIES, BEST PRACTICES, and EDGE CASES."
         )
 
-    doc_upper = doc.upper()
-    missing = [s for s in _REQUIRED_SECTIONS if s not in doc_upper]
+    # Check section presence against header lines only (not the whole doc).
+    headers = "\n".join(_HEADER_RE.findall(doc)).upper()
+    missing = [grp[0] for grp in _REQUIRED_SECTIONS if not any(k in headers for k in grp)]
     if missing:
         return (
-            f"design_document is missing required sections: {', '.join(missing)}. "
-            "Include all sections: GOAL & SUCCESS CRITERIA, APPROACH, "
-            "WORKFLOW, CONSTRAINTS, INPUT/OUTPUT, LIBRARIES, "
-            "BEST PRACTICES, and EDGE CASES."
+            f"design_document is missing required sections (as markdown "
+            f"headers): {', '.join(missing)}. Use '#'-style headers for each "
+            "of: GOAL & SUCCESS CRITERIA, APPROACH, WORKFLOW, CONSTRAINTS, "
+            "INPUT/OUTPUT, LIBRARIES, BEST PRACTICES, and EDGE CASES."
         )
 
     if not output.libraries:
@@ -362,6 +367,22 @@ def _validate_designer_output(output: Any) -> str | None:
             "verifiable criteria that define when the code is 'done'."
         )
 
+    figure_outputs = [f for f in output.output_files if f.lower().endswith(".png")]
+    if figure_outputs and not output.figures:
+        return (
+            "The design specifies figure outputs but the structured "
+            "`figures` field is empty. Populate one entry per figure with "
+            "filename, shows, and purpose — the human reviewer approves "
+            "the plan from this field."
+        )
+    for fig in output.figures:
+        if not fig.purpose.strip() or not fig.shows.strip():
+            return (
+                f"Figure entry '{fig.filename}' is missing `shows` or "
+                "`purpose`. Every figure must state what it displays and "
+                "why it helps answer the hypothesis."
+            )
+
     disallowed = set(output.libraries) - ALLOWED_IMPORTS
     if disallowed:
         return (
@@ -369,6 +390,38 @@ def _validate_designer_output(output: Any) -> str | None:
             f"Choose only from: {', '.join(sorted(ALLOWED_IMPORTS))}"
         )
     return None
+
+
+def render_figure_plan(output: CodeDesignerOutputSchema) -> str:
+    """Render the figure plan as review markdown for the approval gate.
+
+    This is what the human sees before any figures are plotted: every
+    planned figure with what it shows and why it matters, plus the
+    criteria the figures will be checked against. Approve, or reply with
+    changes.
+    """
+    lines: list[str] = ["## Proposed Figure Plan — review before plotting", ""]
+
+    if output.figures:
+        lines.append("| # | Figure | What it shows | Why it matters |")
+        lines.append("|---|--------|---------------|----------------|")
+        for i, fig in enumerate(output.figures, start=1):
+            shows = fig.shows.replace("|", "\\|")
+            purpose = fig.purpose.replace("|", "\\|")
+            lines.append(f"| {i} | `{fig.filename}` | {shows} | {purpose} |")
+    else:
+        lines.append("*(no figures specified in this plan)*")
+
+    lines.append("")
+    lines.append("### What the figures will be checked against")
+    for c in output.success_criteria:
+        lines.append(f"- {c}")
+    lines.append("")
+    lines.append(
+        "**Approve to plot these figures, or describe what to change "
+        "(add/drop/alter figures) and the plan will be revised.**"
+    )
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +441,7 @@ class CodeDesignerConfig(PydanticAIBaseAgentConfig):
         ),
     )
     model_name: str = Field(default="openai:gpt-5.2")
-    data_format_context: str = Field(default="", description=_DATA_FORMAT_CONTEXT_DESC)
+    data_format_context: str = Field(default="", description=DATA_FORMAT_CONTEXT_DESC)
     analysis_methodology: str = Field(default="", description=_ANALYSIS_METHODOLOGY_DESC)
 
 

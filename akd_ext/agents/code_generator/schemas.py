@@ -6,7 +6,7 @@ from ``akd._base.InputSchema`` / ``OutputSchema`` for framework compatibility.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from akd._base import InputSchema, OutputSchema
 
@@ -14,6 +14,7 @@ __all__ = [
     # Intermediate
     "VettedCode",
     "AttemptRecord",
+    "FigurePlan",
     # Designer
     "CodeDesignerInputSchema",
     "CodeDesignerOutputSchema",
@@ -68,13 +69,35 @@ class CodeDesignerInputSchema(InputSchema):
     )
 
 
+class FigurePlan(BaseModel):
+    """One planned figure, structured for human review.
+
+    This is the unit of the approval gate: a reviewer reads *what* each
+    figure shows and *why* it exists, then approves or requests changes.
+    """
+
+    filename: str = Field(..., description="Output filename, e.g. intensity_comparison.png")
+    shows: str = Field(
+        ...,
+        description="One sentence: exactly what data/comparison the figure displays.",
+    )
+    purpose: str = Field(
+        ...,
+        description=(
+            "One sentence: why this figure helps answer the hypothesis / "
+            "task question. Written for the reviewing scientist."
+        ),
+    )
+
+
 class CodeDesignerOutputSchema(OutputSchema):
     """Design document produced by the Code Designer Agent.
 
     The ``design_document`` is a comprehensive markdown spec that gives
     the code generator everything it needs to produce correct code on the
-    first attempt.  ``libraries`` and ``output_files`` are extracted as
-    structured fields so the pipeline can use them without parsing markdown.
+    first attempt.  ``libraries``, ``output_files``, and ``figures`` are
+    extracted as structured fields so the pipeline and review UIs can use
+    them without parsing markdown.
     """
 
     __response_field__ = "design_document"
@@ -102,6 +125,15 @@ class CodeDesignerOutputSchema(OutputSchema):
             "Concrete, verifiable success criteria from the GOAL & SUCCESS "
             "CRITERIA section. Each criterion must be checkable yes/no by "
             "reading the code output. Used by the intent checker downstream."
+        ),
+    )
+    figures: list[FigurePlan] = Field(
+        default_factory=list,
+        description=(
+            "Structured figure plan mirroring the VISUALISATION "
+            "SPECIFICATIONS section: one entry per planned figure with "
+            "filename, what it shows, and why it matters. Presented to the "
+            "human reviewer for approval before code generation."
         ),
     )
 
@@ -201,12 +233,15 @@ class IntentCheckerOutputSchema(OutputSchema):
 
 
 class ValidationResult(BaseModel):
-    """Aggregated result from all three code validators."""
+    """Aggregated result from the deterministic validators (allowlist + bandit).
+
+    The LLM intent checker is not part of this — its verdict is carried
+    separately in ``IntentCheckerOutputSchema``.
+    """
 
     passed: bool
     allowlist_passed: bool = True
     bandit_passed: bool = True
-    intent_passed: bool = True
     failure_reasons: list[str] = Field(default_factory=list)
 
 
@@ -224,6 +259,23 @@ class CodeGeneratorPipelineInputSchema(InputSchema):
             "Free-form context for the code to be generated. "
             "The designer reads this and produces a design document; "
             "the generator implements it."
+        ),
+    )
+    design_document: str = Field(
+        default="",
+        description=(
+            "Pre-approved design document (markdown). When non-empty the "
+            "pipeline SKIPS its internal designer and generates directly "
+            "from this design — used for human-in-the-loop flows where "
+            "the design was reviewed and confirmed before generation."
+        ),
+    )
+    success_criteria: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Success criteria accompanying a pre-approved design_document. "
+            "Forwarded to the intent checker. Ignored when design_document "
+            "is empty."
         ),
     )
 
@@ -282,7 +334,14 @@ class CodeGeneratorPipelineOutputSchema(OutputSchema):
             "understanding pipeline convergence."
         ),
     )
-    total_attempts: int = Field(
-        default=0,
-        description="Total number of generator attempts used.",
-    )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def total_attempts(self) -> int:
+        """Total generator attempts used — derived from attempt_history.
+
+        The pipeline appends exactly one record per attempt, so this is
+        always ``len(attempt_history)``; deriving it avoids a second copy
+        of the same state that could drift if the loop changes.
+        """
+        return len(self.attempt_history)

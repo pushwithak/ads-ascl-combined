@@ -34,6 +34,7 @@ from akd_ext.agents.code_generator.validator import (
 )
 from akd_ext.agents.code_generator.schemas import (
     CodeDesignerInputSchema,
+    FigurePlan,
     CodeDesignerOutputSchema,
     CodeGeneratorInputSchema,
     CodeGeneratorOutputSchema,
@@ -47,6 +48,7 @@ from akd_ext.agents.code_generator.schemas import (
 from akd_ext.agents.code_generator.designer import (
     CodeDesignerAgent,
     CodeDesignerConfig,
+    render_figure_plan,
 )
 from akd_ext.agents.code_generator.generator import (
     CodeGeneratorAgent,
@@ -79,6 +81,8 @@ __all__ = [
     "IntentCheckerOutputSchema",
     "VettedCode",
     "ValidationResult",
+    "FigurePlan",
+    "render_figure_plan",
     # Code Validators
     "ALLOWED_IMPORTS",
     "AllowlistResult",

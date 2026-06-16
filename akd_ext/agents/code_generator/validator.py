@@ -28,6 +28,11 @@ from typing import Any
 from pydantic import Field
 
 from akd_ext.agents._base import PydanticAIBaseAgent, PydanticAIBaseAgentConfig
+from akd_ext.agents.code_generator._prompt import (
+    DATA_FORMAT_CONTEXT_DESC,
+    assemble_prompt,
+    section,
+)
 from akd_ext.agents.code_generator.schemas import (
     IntentCheckerInputSchema,
     IntentCheckerOutputSchema,
@@ -53,6 +58,9 @@ __all__ = [
 
 ALLOWED_IMPORTS: frozenset[str] = frozenset(
     {
+        # The fixed execution harness — exposes pre-loaded data helpers
+        # (smooth, anomaly_vs_baseline) to generated plot modules
+        "harness",
         # Scientific stack
         "numpy",
         "pandas",
@@ -196,6 +204,17 @@ class BanditResult:
     error: str | None = None
 
 
+# Bandit severity ordering — single source of truth. Used both for the
+# pass/fail threshold here and by any caller that ranks/filters findings
+# (e.g. the pipeline's failure-reason builder), so the two never desync.
+SEVERITY_RANK: dict[str, int] = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
+
+
+def severity_rank(severity: str) -> int:
+    """Rank a bandit severity label; unknown labels rank 0 (below LOW)."""
+    return SEVERITY_RANK.get(severity.upper(), 0)
+
+
 def check_bandit(code: str, *, fail_on: str = "HIGH") -> BanditResult:
     """Run ``bandit`` on *code* and fail if any finding meets *fail_on* severity.
 
@@ -211,8 +230,7 @@ def check_bandit(code: str, *, fail_on: str = "HIGH") -> BanditResult:
     BanditResult
         ``.passed`` is ``True`` when nothing at-or-above *fail_on* was found.
     """
-    severity_rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
-    threshold = severity_rank.get(fail_on.upper(), 3)
+    threshold = SEVERITY_RANK.get(fail_on.upper(), 3)
 
     tmp_path: str | None = None
     try:
@@ -257,7 +275,7 @@ def check_bandit(code: str, *, fail_on: str = "HIGH") -> BanditResult:
         ]
 
         max_sev = max(
-            (severity_rank.get(f.severity, 0) for f in findings),
+            (severity_rank(f.severity) for f in findings),
             default=0,
         )
         return BanditResult(passed=max_sev < threshold, findings=findings)
@@ -345,15 +363,11 @@ choices — that is not your job.**
 
 **Judge what the code actually does on well-formed inputs. NEVER reject \
 on hypotheticals** ("could escape if the inputs were malicious", "could \
-write elsewhere if mis-specified"). Two behaviors that are ALWAYS \
-legitimate:
-- Resolving file paths declared *inside* input data files (e.g., a \
-  header/metadata file referencing a sibling binary file) — that is how \
-  such formats work. Verify it follows the design's containment \
-  constraints; do not invent stricter ones.
-- Writing to the user-supplied ``--output-dir``, wherever it points. \
-  That directory is the designated output location *by definition* — \
-  it cannot be an escape.
+write elsewhere if mis-specified"). The expected I/O surface of a plot \
+module is exactly: receive the pre-loaded ``data`` object, save figures \
+under the ``output_dir`` it was handed. Writing under ``output_dir``, \
+wherever it points, is the designated output location *by definition* — \
+it cannot be an escape.
 
 ### confidence (float, 0.0–1.0)
 - **≥ 0.8**: Clear-cut — code implements the plan and is safe.
@@ -458,32 +472,31 @@ code, not cosmetic issues. Think: "would a domain scientist get useful \
 analysis output from this script on well-formed input data?"
 
 **APPROVE (matches_intent=True) if the code:**
-- Reads the correct input data files
-- Produces the figures and outputs specified in the design (count and \
-  scientific content, not exact filenames)
+- Uses the provided data interface correctly
+- Produces the figures specified in the design (count and scientific \
+  content, not exact filenames)
 - Computes the right types of diagnostics
 - Would run without crashing on well-formed input data
 
 **REJECT (matches_intent=False) ONLY if the code:**
 - Ignores the design (e.g., produces unrelated output)
 - Has a bug that would crash on ANY valid input (not edge cases)
-- Reads the wrong data format (e.g., reads CSV when data is binary)
+- Ignores the data interface (e.g., tries to read files directly \
+  instead of using the provided ``data`` object)
 - Is missing an entire category of analysis the design requires
 - Produces zero useful output
 
 ---
 
-## BINARY READER LOGIC — NOT YOUR CALL
+## THE HARNESS BOUNDARY — NOT YOUR CALL
 
-You cannot execute the code, and byte-level correctness of binary \
-readers is not statically decidable. If a DATA FORMAT REFERENCE is \
-appended below, it is ground truth — written and verified by the \
-pipeline maintainers against real data files. Reader code that follows \
-its documented layout is correct BY DEFINITION. Do NOT reject because \
-you believe the format "often" or "generally" differs from the \
-documented layout — your general knowledge of the file format family \
-does not override the reference. Reject reader logic ONLY if it \
-visibly contradicts the documented layout itself.
+The code under review is a **plot module** executed by a fixed harness. \
+Data loading, file discovery, CLI parsing, and unit conversion are the \
+harness's job — their ABSENCE from the module is correct, never a \
+defect. If a DATA FORMAT REFERENCE is appended below, it is ground \
+truth for the ``data`` object the module receives — judge variable \
+usage against it and do not invent stricter requirements than it \
+states.
 
 ---
 
@@ -530,26 +543,15 @@ class IntentCheckerConfig(PydanticAIBaseAgentConfig):
 
     system_prompt: str = Field(default=_GENERIC_INTENT_CHECKER_PROMPT)
     model_name: str = Field(default="openai:gpt-5.2")
-    data_format_context: str = Field(
-        default="",
-        description=(
-            "Domain-specific data format description appended to the "
-            "system prompt. Ground truth for judging data-reading code — "
-            "without it the checker second-guesses binary reader logic "
-            "it cannot verify."
-        ),
-    )
+    data_format_context: str = Field(default="", description=DATA_FORMAT_CONTEXT_DESC)
 
 
 def _assemble_intent_checker_prompt(config: "IntentCheckerConfig") -> str:
     """Build the full system prompt from config fields."""
-    parts = [config.system_prompt]
-    if config.data_format_context.strip():
-        parts.append(
-            "\n\n---\n\n## DATA FORMAT REFERENCE\n\n"
-            + config.data_format_context.strip()
-        )
-    return "".join(parts)
+    return assemble_prompt(
+        config.system_prompt,
+        section("DATA FORMAT REFERENCE", config.data_format_context),
+    )
 
 
 class IntentCheckerAgent(
