@@ -57,7 +57,11 @@ from akd_ext.agents.closed_loop.cm1.prompts import (
     RESEARCH_REPORT_GENERATOR_SYSTEM_PROMPT,
     WORKFLOW_SPEC_BUILDER_SYSTEM_PROMPT,
 )
-from akd_ext.agents.closed_loop.cm1.tools import get_default_impl_tools, get_default_report_tools
+from akd_ext.agents.closed_loop.cm1.tools import (
+    _mcp_auth_headers,
+    get_default_impl_tools,
+    get_default_report_tools,
+)
 from akd_ext.agents.closed_loop.stages.capability_feasibility_mapper import (
     CapabilityFeasibilityMapperAgent,
     CapabilityFeasibilityMapperConfig,
@@ -452,22 +456,13 @@ class CM1ExperimentAnalysisAgent(ExperimentAnalysisAgent):
 
     @property
     def _auth_headers(self) -> dict[str, str]:
-        """Bearer for FastMCP Cloud (``*.fastmcp.app``), else X-API-Key.
+        """Auth header for the CM1 MCP server.
 
-        Matches the scheme resolution in ``cm1/tools.py`` so the same
-        ``CM1_MCP_URL`` works for job_submit and job_status / job_plot —
-        including a mock endpoint on FastMCP Cloud. ``CM1_MCP_AUTH``
-        overrides the auto-detection.
+        Delegates to ``cm1/tools._mcp_auth_headers`` — the single source of
+        scheme resolution — so job_submit (tools.py) and job_status / job_plot
+        (here) can never desync on a future auth change.
         """
-        import os as _os
-
-        key = self._api_key
-        scheme = _os.environ.get("CM1_MCP_AUTH", "").lower()
-        if not scheme:
-            scheme = "bearer" if "fastmcp.app" in (self.config.mcp_url or "") else "x-api-key"
-        if scheme == "bearer":
-            return {"Authorization": f"Bearer {key}"}
-        return {"X-API-Key": key}
+        return _mcp_auth_headers(self._api_key, self.config.mcp_url or "")
 
     # -- per-job state files (job_id namespaces design/module state) --------
 
@@ -478,6 +473,34 @@ class CM1ExperimentAnalysisAgent(ExperimentAnalysisAgent):
     @staticmethod
     def _module_path(job_id: str) -> Path:
         return Path(f"cm1_analysis_module_{job_id}.py")
+
+    def _read_pending(self, job_id: str) -> dict[str, Any] | None:
+        """Load the persisted figure plan, or None if absent or unreadable.
+
+        A truncated/corrupt state file (interrupted or interleaved write)
+        returns None — the caller falls back to a fresh plan — instead of
+        raising JSONDecodeError out of the turn.
+        """
+        p = self._pending_path(job_id)
+        if not p.exists():
+            return None
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(f"[Stage5] pending plan for {job_id} unreadable ({exc!r}); treating as no plan")
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _write_pending(self, job_id: str, data: dict[str, Any]) -> None:
+        """Persist the figure plan atomically (write temp + replace).
+
+        os.replace is atomic, so an interrupted write can never leave a
+        half-written file that the next read would choke on.
+        """
+        p = self._pending_path(job_id)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.replace(p)
 
     def _module_is_current(self, job_id: str) -> bool:
         """True if the analysis module is already built from the CURRENT plan.
@@ -619,11 +642,42 @@ class CM1ExperimentAnalysisAgent(ExperimentAnalysisAgent):
             success_criteria=meta.get("success_criteria", []),
         ))
         if isinstance(gen, CodeGeneratorPipelineOutputSchema) and gen.vetted_code:
-            self._module_path(params.job_id).write_text(gen.vetted_code.code, encoding="utf-8")
+            # Persist the vetted plot module locally (artifact / fallback)...
+            code = gen.vetted_code.code
+            self._module_path(params.job_id).write_text(code, encoding="utf-8")
+            module_file = self._module_path(params.job_id).name
+            # ...then SHIP it to the harness via the code_submit MCP tool, which
+            # runs cm1_harness.py on the experiment data and produces the
+            # figures that job_plot will return. If the endpoint isn't
+            # reachable, fall back to an honest "generated, not submitted".
+            from akd_ext.agents.closed_loop.stages.experiment_analysis import _mcp_call
+
+            try:
+                payload = await _mcp_call(
+                    url=self.config.mcp_url, headers=self._auth_headers,
+                    tool="code_submit",
+                    args={"code": code, "job_id": params.job_id},
+                    read_timeout=600.0,  # the harness run is synchronous
+                )
+            except Exception as exc:  # noqa: BLE001 — endpoint may be absent
+                logger.warning(f"[Stage5] code_submit unavailable: {exc!r}")
+                return TextOutput(content=(
+                    f"**Plan approved — analysis module generated** "
+                    f"(`{module_file}`). I couldn't reach the harness submit "
+                    f"endpoint ({exc}), so it hasn't run yet. Once it's run "
+                    f"through the harness, ask me to 'analyze' to fetch the figures."
+                ))
+            if payload.get("status") == "completed":
+                n = payload.get("figures_produced", 0)
+                return TextOutput(content=(
+                    f"**Plan approved and submitted.** The harness ran the "
+                    f"analysis module and produced {n} figure(s). Ask me to "
+                    f"'analyze' to fetch and interpret them."
+                ))
+            err = payload.get("error") or (payload.get("log_tail", "")[-400:]) or "unknown error"
             return TextOutput(content=(
-                "**Plan approved and submitted.** Once the experiment "
-                "completes, send 'check status' to poll, then 'analyze' to "
-                "fetch and interpret the figures."
+                f"**Plan approved**, but the harness run failed:\n{err}\n\n"
+                f"Revise the plan (e.g. 'drop figure 6') and approve again."
             ))
         attempts = getattr(gen, "attempt_history", []) or []
         trail = "\n".join(
@@ -632,7 +686,7 @@ class CM1ExperimentAnalysisAgent(ExperimentAnalysisAgent):
         )
         reason = getattr(gen, "rejection_reason", str(gen))
         return TextOutput(content=(
-            f"Code generation failed after {len(attempts)} attempts — nothing submitted.\n"
+            f"Code generation failed after {len(attempts)} attempts — no module generated.\n"
             f"Most recent reason: {reason}\n"
             + (f"{trail}\n" if trail else "")
             + "Reply with a change (e.g. 'drop figure 6') and I'll revise the plan, then approve again."
@@ -650,16 +704,16 @@ class CM1ExperimentAnalysisAgent(ExperimentAnalysisAgent):
         """
         msg = (params.message or "").strip()
         low = msg.lower()
-        pending = self._pending_path(params.job_id)
         base_ctx = self._design_context(params)
-        # The FIRST turn (no plan on disk yet) is the greeting, regardless of
-        # what the scientist typed to open the chat ("hi", "start", "show me").
-        is_fresh = not pending.exists()
+        # The FIRST turn is the greeting. "Fresh" = no readable plan on disk —
+        # so a missing OR corrupt state file both fall back to a fresh plan
+        # (never crash on a truncated file).
+        prev = self._read_pending(params.job_id)
+        is_fresh = prev is None
 
         if not is_fresh:
             # Cumulative revision — give the designer the EXACT current plan
             # and ask it to apply only this delta, keeping all else unchanged.
-            prev = json.loads(pending.read_text(encoding="utf-8"))
             ctx = (
                 base_ctx
                 + "\n\n---\n# CURRENT FIGURE PLAN (revise THIS document)\n\n"
@@ -679,14 +733,11 @@ class CM1ExperimentAnalysisAgent(ExperimentAnalysisAgent):
             ctx = base_ctx
         design = await CM1PlotDesignerAgent().arun(CodeDesignerInputSchema(context=ctx))
         if isinstance(design, CodeDesignerOutputSchema):
-            pending.write_text(
-                json.dumps({
-                    "design_document": design.design_document,
-                    "success_criteria": design.success_criteria,
-                    "figures": [f.model_dump() for f in design.figures],
-                }, indent=2),
-                encoding="utf-8",
-            )
+            self._write_pending(params.job_id, {
+                "design_document": design.design_document,
+                "success_criteria": design.success_criteria,
+                "figures": [f.model_dump() for f in design.figures],
+            })
             if is_fresh:
                 # First entry into the stage — introduce ourselves, check the
                 # real job status, then present the plan proactively (no
@@ -838,20 +889,20 @@ class CM1ExperimentAnalysisAgent(ExperimentAnalysisAgent):
 
         # --- approve: generate the analysis module
         if phase == "approve":
-            pending = self._pending_path(params.job_id)
-            if not pending.exists():
+            meta = self._read_pending(params.job_id)
+            if meta is None:
                 out: ExperimentAnalysisOutputSchema | TextOutput = TextOutput(
                     content="Nothing to approve yet — send 'design' to get a figure plan first."
                 )
             elif self._module_is_current(params.job_id):
                 out = TextOutput(content=(
-                    "The plan is already approved and the figures are generated — "
-                    "nothing to re-plot. Ask me to 'check status' or 'analyze' the results "
+                    "The plan is already approved and the analysis module is generated — "
+                    "nothing to re-generate. Ask me to 'check status' or 'analyze' the results "
                     "(revise the plan first if you want different figures)."
                 ))
             else:
                 yield RunningEvent(source=cn, message="Plotting the approved figures…", run_context=run_context)
-                out = await self._generate_module(params, json.loads(pending.read_text(encoding="utf-8")))
+                out = await self._generate_module(params, meta)
             yield CompletedEvent(source=cn, message=f"Completed {cn}", data=CompletedEventData(output=out), run_context=run_context)
             return
 
@@ -886,16 +937,16 @@ class CM1ExperimentAnalysisAgent(ExperimentAnalysisAgent):
                 params.job_id, question=params.message, workspace=params.workspace_name)
 
         if phase == "approve":
-            pending = self._pending_path(params.job_id)
-            if not pending.exists():
+            meta = self._read_pending(params.job_id)
+            if meta is None:
                 return TextOutput(content="Nothing to approve yet — send 'design' to get a figure plan first.")
             if self._module_is_current(params.job_id):
                 return TextOutput(content=(
-                    "The plan is already approved and the figures are generated — "
-                    "nothing to re-plot. Ask me to 'check status' or 'analyze' the results "
+                    "The plan is already approved and the analysis module is generated — "
+                    "nothing to re-generate. Ask me to 'check status' or 'analyze' the results "
                     "(revise the plan first if you want different figures)."
                 ))
-            return await self._generate_module(params, json.loads(pending.read_text(encoding="utf-8")))
+            return await self._generate_module(params, meta)
 
         if phase == "clarify":
             return TextOutput(content=_CLARIFY_MSG)
