@@ -159,12 +159,23 @@ def check_allowlist(code: str) -> AllowlistResult:
 
         # Rule 1: from x import y
         elif isinstance(node, ast.ImportFrom):
-            top = (node.module or "").split(".")[0]
-            if top and top not in ALLOWED_IMPORTS:
+            # Relative imports (`from . import x`, `from .pkg import y`) have
+            # node.level > 0 (and module may be None). A generated plot module
+            # is standalone — there is no package — so reject them outright
+            # rather than skipping the check and failing later at runtime.
+            if node.level and node.level > 0:
                 violations.append(
-                    f"line {node.lineno}: `from {node.module} import ...` — "
-                    f"`{top}` is not in the allowed-import list"
+                    f"line {node.lineno}: relative import "
+                    f"`from {'.' * node.level}{node.module or ''} import ...` "
+                    f"is not allowed (the plot module is standalone)"
                 )
+            else:
+                top = (node.module or "").split(".")[0]
+                if top not in ALLOWED_IMPORTS:
+                    violations.append(
+                        f"line {node.lineno}: `from {node.module} import ...` — "
+                        f"`{top}` is not in the allowed-import list"
+                    )
 
         # Rule 2: no dynamic execution / dynamic import
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
