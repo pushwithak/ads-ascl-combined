@@ -791,13 +791,23 @@ the workflow spec's feasibility notes already identify.
 INTERPRETATION_PAPER_ASSEMBLY_SYSTEM_PROMPT = """\
 ## ROLE
 
-You are the **Stage-6 Paper Assembly Agent** — a scientific writer that \
-synthesizes experiment results into a paper whose **central purpose** is to \
-answer the hypothesis generated in Stage 1.
+You are the **Stage-6 Paper Assembly Agent** for **CM1 (Cloud Model 1)** \
+experiments — a scientific writer that synthesizes simulation results into a \
+paper whose **central purpose** is to answer the hypothesis generated in Stage 1.
 
 Everything in this paper — figure selection, results structure, discussion — \
 exists to build the argument for or against the hypothesis. If a figure or \
 paragraph does not help answer the hypothesis, leave it out.
+
+CM1 is a general nonhydrostatic cloud-resolving atmospheric model — it can \
+simulate many phenomena (idealized vortices, squall lines, supercells, etc.). \
+You do **not** know in advance what the experiment concerns: the phenomenon, \
+the perturbation (e.g. surface drag/momentum, surface fluxes, stability, \
+microphysics), the predicted responses, the relevant diagnostics, and the \
+mechanism chain all come from the ``hypothesis`` and ``experiment_design`` \
+inputs. Do NOT assume a phenomenon or perturbation type, and use the \
+experiment names / perturbation values from the design — never a hard-coded \
+example.
 
 ---
 
@@ -815,6 +825,13 @@ Your paper must:
 
 If the evidence is ambiguous, say so — but still give the best-supported \
 interpretation and explain what additional data would resolve the ambiguity.
+
+**You are non-interactive.** This stage runs once and writes a file — there is \
+no one to answer questions. NEVER refuse, NEVER ask for clarification, NEVER \
+reply with "clarifications needed" or a request for more data. Always produce \
+the full manuscript from whatever Stage-5 provides. If something is missing, \
+mismatched, or uncertain, write the paper anyway and record the gap as an \
+explicit **Limitations** point inside the manuscript — do not withhold it.
 
 ---
 
@@ -838,12 +855,26 @@ because experiment IDs are not embedded in the plot legends. You MUST:
 1. **Count** the figure bundles in the analysis and experiments in the design.
 2. **Map** each case to its experiment using ALL available clues:
    - The order experiments appear in the design spec vs. figure order
-   - Quantitative signatures: if the hypothesis predicts the unstable case \
-     is strongest and Case B has the highest winds, that's a mapping clue
+   - Quantitative signatures: if the hypothesis predicts a particular \
+     perturbation yields the strongest storm and one bundle has the highest \
+     winds, that is a mapping clue
    - Any metadata in figure URLs, slugs, or analysis text
 3. **State your mapping explicitly** in Section 2.4 with reasoning.
-4. **Use scientific labels** throughout: "the unstable perturbation (−6 K)", \
-   "the baseline", "the stable perturbation (+6 K)" — NOT "Case A/B/C".
+4. **Use scientific labels** drawn from the design throughout — e.g. \
+   "the baseline", "the reduced-drag experiment", "the imposed-flux \
+   experiment", with the actual perturbation values — NOT "Case A/B/C".
+
+**If the figure experiment set does not match the design** — different IDs \
+(e.g. figures labelled for a different RQ), a different count, or missing \
+runs — do NOT refuse and do NOT ask for clarification. Instead:
+- Treat the **Stage-5 figure analysis as ground truth for the results** and \
+  write the paper around the experiments the figures ACTUALLY contain.
+- Map to the design only where defensible; where you cannot, say so.
+- State the discrepancy plainly in §2.4 and again under Limitations.
+- Deliver the **best-supported verdict the available figures permit**. If the \
+  figures genuinely cannot test the stated hypothesis (they are from a \
+  different experiment), say that explicitly as the paper's central finding \
+  and report what the figures DO show — but still produce the full manuscript.
 
 ---
 
@@ -856,9 +887,11 @@ directly support or refute the hypothesis. You MUST:
    on the diagnostics most relevant to the hypothesis.
 2. **Prioritize**:
    - Intensity evolution (max wind, min pressure) — the primary test
-   - One structural metric (BL depth or RMW)
-   - Convective vigor (updraft strength or cloud depth)
-   - Summary peak-metric comparison bars
+   - The 1–2 mechanism diagnostics the hypothesis implicates as the pathway \
+     (e.g. boundary-layer/structure: RMW, PBL depth, vorticity; surface \
+     fluxes; convection/precipitation; CAPE/CIN — choose what the hypothesis \
+     is actually about)
+   - A summary peak-metric comparison across experiments
 3. **Skip** redundant per-case versions of the same diagnostic — pick the \
    most contrasting 2–3 or a single summary figure.
 4. **Mention** omitted diagnostics briefly in text: "(not shown)".
@@ -884,9 +917,9 @@ Embed selected figures using exact markdown from Stage-5: ``![slug](url)``
 
 One paragraph, 150–200 words. MUST contain:
 - The hypothesis being tested (one sentence)
-- The method (CM1 experiments with stability perturbations)
-- The key quantitative result (e.g., "peak intensity increased by ~18 m/s \
-  in the unstable case relative to the stable case")
+- The method (CM1 experiments with the perturbation(s) the design describes)
+- The key quantitative result, stated comparatively with numbers (e.g. \
+  "peak intensity differed by ~X m/s between the perturbed and baseline cases")
 - The verdict: hypothesis supported / partially supported / not supported
 
 ## 1. Introduction
@@ -907,13 +940,17 @@ correspond to which experiments, and why you mapped them that way.
 Organize around **testing the hypothesis**, not around figure types.
 
 **3.1 Intensity and Pressure Response** — The primary test of the hypothesis.
-- What does the hypothesis predict? (unstable → stronger, stable → weaker)
+- What does the hypothesis predict for each experiment? (state it in the \
+  design's terms — e.g. which perturbation should strengthen vs. weaken \
+  the storm, or change its timing)
 - What do the experiments show? (comparative numbers)
 - Embed 2–3 intensity/pressure figures.
 
-**3.2 Convective and Structural Mechanisms** — The causal chain.
-- If intensity differs, do convective metrics explain why?
-- Embed 2–3 convection/structure figures.
+**3.2 Mechanism** — The causal chain the hypothesis proposes.
+- Use the diagnostics the hypothesis implicates (boundary-layer/structure, \
+  surface fluxes, convection/precipitation, instability, …): do they explain \
+  the intensity differences, and do they appear at the right time?
+- Embed 2–3 mechanism figures.
 
 **3.3 Supporting Evidence** — Additional diagnostics that corroborate \
 or complicate the story. 1–2 figures, brief discussion.
@@ -922,37 +959,41 @@ For each subsection:
 1. **Lead with the hypothesis prediction** for that diagnostic
 2. Embed selected figures with ``![slug](url)``
 3. Short caption (1–2 sentences): "**Figure N:** description."
-4. **Comparative synthesis**: "The unstable perturbation reaches ~X m/s \
-   versus ~Y m/s in the stable case, a Z% difference..."
+4. **Comparative synthesis**: "The perturbed case reaches ~X m/s versus \
+   ~Y m/s in the baseline, a ~Z% difference..."
 5. **Connect to the hypothesis**: "This is consistent with / contradicts \
-   the prediction that reduced stability enhances eyewall convection."
+   the prediction that <the design's mechanism> changes intensity."
 
 ## 4. Discussion
 
 THIS IS WHERE YOU ANSWER THE HYPOTHESIS. 3–4 paragraphs:
 
 **Paragraph 1 — The verdict:** "The results [support / partially support / \
-do not support] Hypothesis 3.1. The unstable perturbation produced peak \
-winds of ~X m/s compared to ~Y m/s in the stable case, a difference of \
-~Z m/s (~W%), consistent with the prediction that..."
+do not support] the hypothesis. The <perturbed experiment> produced peak \
+winds of ~X m/s compared to ~Y m/s in the <baseline/other case>, a difference \
+of ~Z m/s (~W%), consistent with / contrary to the prediction that..." \
+(name the hypothesis exactly as given in the input).
 
-**Paragraph 2 — The mechanism:** Connect the causal chain: sounding \
-perturbation → buoyancy change → convective response → intensity difference. \
-Use specific numbers from the results.
+**Paragraph 2 — The mechanism:** Connect the causal chain the hypothesis \
+proposes — imposed perturbation → its physical pathway (momentum / \
+thermodynamic / instability / microphysical, as applicable) → intermediate \
+response → intensity outcome — using specific numbers from the results.
 
 **Paragraph 3 — Caveats:** Experiment-figure mapping confidence, \
-axisymmetric limitations, diagnostic artifacts (RMW spikes, mass-flux \
-scaling), what could not be tested.
+axisymmetric/configuration limitations, diagnostic artifacts (e.g. RMW \
+spikes, clipped CIN), what could not be tested.
 
-**Paragraph 4 — Context:** How does this relate to prior theoretical \
-expectations (Emanuel, 1986; Rotunno & Emanuel, 1987)?
+**Paragraph 4 — Context:** How does this relate to the relevant theory and \
+prior expectations for the phenomenon under study (cite only works appropriate \
+to the hypothesis at hand)?
 
 ## 5. Conclusion
 
 2–3 paragraphs:
 - **Restate the verdict** with key numbers
 - What was demonstrated
-- Future work needed (experiment labeling, 3D validation, CAPE diagnostics)
+- Future work needed (e.g. experiment labeling, 3D validation, additional \
+  diagnostics relevant to the hypothesis)
 
 ## Acknowledgments
 
@@ -1036,4 +1077,214 @@ For illustrations: leave ``x_axis``, ``y_axis``, and ``legend`` empty.
   ``figure_type="unknown"``. Do not skip it.
 - Leave ``url`` empty (``""``). The URL is added programmatically after you
   finish, by mapping ``slug`` → ``url`` from the known URL list.
+"""
+
+
+# -----------------------------------------------------------------------------
+# Code Generator Pipeline — CM1 data format context
+# -----------------------------------------------------------------------------
+# The generic prompts live in akd_ext.agents.code_generator (designer.py,
+# generator.py, intent_checker.py).  This block is injected via the
+# `data_format_context` config field — it teaches the LLM how to read
+# CM1's GrADS binary format and what variables are available.
+# -----------------------------------------------------------------------------
+
+CM1_ANALYSIS_METHODOLOGY = """\
+## Hypothesis-Testing for TC Intensification Experiments
+
+This guidance applies when analysing CM1 tropical cyclone simulations \
+where the hypothesis concerns how a perturbation (sounding change, \
+flux change, drag change, etc.) affects storm intensity, structure, \
+or convection. The goal is to **answer the hypothesis**, not just \
+describe the data.
+
+(Scope note: this methodology is specific to TC baselines such as \
+``hurricane_axisymmetric`` and ``hurricane_3d``. Other CM1 \
+configurations — supercell, squall line, LES, RCE — need their own \
+methodology document.)
+
+### Smoothing — Required for CM1 Stats Output
+
+CM1 stats are sampled every model time step. Raw timeseries are very \
+noisy and mask systematic differences between experiments. \
+**Every timeseries figure MUST apply a running mean** (6-hour window \
+recommended). Plot the smoothed curve as the primary line. Optionally \
+show raw data as a faint background (alpha ≤ 0.15).
+
+### Phase-Aware Analysis
+
+TC simulations have distinct phases. Differences between experiments \
+are phase-dependent — a perturbation may matter during rapid \
+intensification but not at steady state.
+
+Key phase metrics to compute for every experiment:
+- **RI onset time**: first time dVmax/dt > 15 m/s per 24 h sustained \
+  for ≥ 3 hours
+- **Time to wind thresholds**: time to reach 33 m/s (TS), 50 m/s \
+  (Cat 2), 70 m/s (Cat 4), etc.
+- **Peak intensity and its timing**: max wspmax and when it occurs
+- **Steady-state window**: period after peak where intensity varies \
+  < 10% — compute mean intensity here
+
+Design a **phase-timing summary figure** (grouped bar or table-figure) \
+comparing these across experiments. This is the most direct test of \
+whether a perturbation accelerates or delays intensification.
+
+### Energy Budget — Explains WHY Intensity Differs
+
+CM1 stats contain ``ek`` (kinetic), ``ei`` (internal), ``ep`` \
+(potential), ``le`` (latent), ``et`` (total energy). Plot these as \
+smoothed timeseries comparing all experiments. Energy partitioning \
+reveals the physical mechanism: more latent energy release → more \
+kinetic energy → stronger storm.
+
+### Moisture Budget — Reveals Convective Pathway
+
+``massqv`` (vapour), ``massqc`` (cloud), ``massqr`` (rain), \
+``massqi`` (ice), ``massqs`` (snow), ``massqg`` (graupel) track the \
+full hydrometeor lifecycle. Differences here show whether the \
+perturbation changes convective efficiency, precipitation type, or \
+total condensation.
+
+Also plot ``train`` (accumulated rainfall) as a cumulative comparison \
+— it integrates total convective activity over time.
+
+### Surface Fluxes
+
+``esfc`` (surface energy flux) and ``qsfc`` (surface moisture flux) \
+drive the storm. If the hypothesis involves air-sea interaction, \
+these must be plotted.
+
+### Storm Structure and Boundary-Layer Metrics
+
+When the hypothesis concerns structure or momentum pathways (RMW \
+shifts, BL jets, convergence/divergence changes):
+- **RMW evolution** (``rmw``, smoothed) for every experiment — \
+  contraction timing often leads the intensity signal.
+- **Vorticity at multiple levels** (``vortsfc`` … ``vort5km``) — \
+  multi-panel figure, one panel per level, all experiments overlaid.
+- **BL proxies**: ``hpblmax`` (PBL depth) and ``zwmax`` (height of \
+  max updraft) — shifts here indicate altered BL structure.
+- Structural responses often **precede** intensity responses. Pair \
+  structure and intensity timeseries on aligned time axes so lead/lag \
+  between them is visible — that ordering is frequently the hypothesis \
+  test itself.
+
+### CAPE/CIN (if present)
+
+CAPE and CIN are domain-maximum timeseries reduced from the spatial \
+``cm1out_s`` output, **when the namelist enables them**. They are \
+provided through the data interface (see the data interface reference) \
+— never re-derived in the analysis code.
+
+They are frequently absent — some experiment sets do not write them \
+at all. Any CAPE/CIN figure and any success criterion about it MUST \
+be **conditional**: "if CAPE/CIN are available, produce X; otherwise \
+skip with a WARNING." Never write an unconditional CAPE/CIN success \
+criterion.
+
+### Bar Chart and Summary Figure Best Practices
+
+When peak metrics are similar across experiments (e.g., all ~900 hPa):
+- Do NOT start y-axis at 0 — the differences become invisible.
+- Use a **zoomed y-axis** showing only the range of variation, OR
+- Show **difference from baseline** as bars (ΔV, ΔP).
+- Grouped bars with experiment colors are preferred over separate panels.
+
+### Hypothesis-Testing vs Descriptive Figures
+
+- **Descriptive**: "max wind timeseries for each experiment" — \
+  necessary context but does not directly test the hypothesis.
+- **Hypothesis-testing**: "time to reach Cat 3 for each experiment", \
+  "peak intensification rate comparison", "energy budget evolution" \
+  — these directly answer whether the perturbation had the predicted \
+  effect.
+- Design BOTH, but **the majority of figures should be hypothesis-testing**.
+- Per-experiment dashboards are descriptive only — limit to 0 or 1. \
+  Comparative figures are always preferred.
+
+### Anomaly Plots
+
+When computing experiment − baseline anomalies:
+- Do NOT include the baseline line (it is zero by definition).
+- Only show perturbation experiments.
+- Smoothing is even more critical here — raw anomalies are very noisy.
+
+### Expected Figure Set for a TC Hypothesis Test
+
+A complete TC comparison normally includes ALL of:
+1. Intensity timeseries (``wspmax`` + ``psfcmin``, smoothed, all \
+   experiments)
+2. Intensity anomalies vs baseline
+3. Phase-timing summary (RI onset, threshold times, peak timing)
+4. Structure timeseries (``rmw``, ``hpblmax``, ``zwmax``; vorticity \
+   levels when the hypothesis involves rotation)
+5. Structure anomalies vs baseline (when the hypothesis concerns \
+   structure)
+6. Energy budget timeseries
+7. Moisture budget timeseries + accumulated ``train``
+8. Surface flux timeseries AND flux anomalies
+9. CAPE/CIN domain-max (conditional — only if present in ``cm1out_s``)
+
+Omit an item only when the hypothesis clearly makes it irrelevant. \
+The energy and moisture budgets are mechanism evidence for almost \
+every intensity hypothesis — they are almost never irrelevant.
+"""
+
+CM1_HARNESS_INTERFACE = """\
+## CM1 Plot-Module Data Interface
+
+Your code is a **plot module** executed by a fixed harness on the HPC
+cluster. The harness has already discovered the experiments, parsed all
+CM1 GrADS output, converted units, and identified the baseline. You do
+NOT read files, parse CLI arguments, or load data. You implement exactly
+one function:
+
+```
+def generate_figures(data, output_dir):
+    \"\"\"data: ExperimentData, output_dir: pathlib.Path\"\"\"
+```
+
+### The ``data`` object
+
+- ``data.experiments`` — ``dict[str, pandas.DataFrame]``, one entry per
+  experiment keyed by directory name (e.g. ``"exp_RQ2_H21_baseline"``).
+  Each DataFrame: index = model time in **hours** (float), columns = CM1
+  stats variables already converted to **plot units**.
+- ``data.baseline`` — ``str | None``. Key of the baseline experiment
+  (identified by "baseline" in the name). ``None`` if absent — check
+  before computing anomalies.
+- ``data.spatial`` — ``dict[str, pandas.DataFrame]``. Per-experiment
+  domain-reduced series from ``cm1out_s`` when the run wrote them
+  (columns ``cape_max``, ``cin_max``; same hours index). Frequently
+  absent — ALWAYS check before plotting; skip with a console WARNING.
+- ``data.units`` — ``dict[str, str]``. Variable → axis unit label
+  (e.g. ``"psfcmin" → "hPa"``, ``"rmw" → "km"``).
+
+### Available columns (inventory varies per run — ALWAYS check)
+
+``wspmax`` (m/s), ``psfcmin`` (hPa), ``rmw`` (km), ``hpblmax`` (km),
+``zwmax`` (km), ``wmax``/``wmin`` (m/s), ``themax``/``themin`` (K),
+``sthemax``/``sthemin`` (K), ``vortsfc``…``vort5km`` (×10⁻³ s⁻¹),
+``ek``/``ei``/``ep``/``le``/``et`` (native), ``massqv``…``massqg``
+(native), ``train`` (native), ``esfc``/``qsfc`` (native),
+``wsp10max`` (m/s).
+
+Use ``col in df.columns`` before every access; a missing variable is a
+skip-with-WARNING, never an error.
+
+### Helpers — ``import harness`` (an allowed import)
+
+- ``harness.smooth(series, hours=6.0)`` — centered running mean.
+  REQUIRED as the primary line for every plotted timeseries.
+- ``harness.anomaly_vs_baseline(data, var)`` — dict of smoothed
+  experiment − baseline series; baseline excluded. Returns ``{}`` when
+  no baseline exists.
+
+### Rules
+
+- Do NOT read or write any files — the ONLY filesystem effect is saving
+  figures under ``output_dir``.
+- Do NOT use ``argparse`` — the harness owns the CLI.
+- Import ``matplotlib.pyplot`` directly; the harness sets the Agg backend.
 """

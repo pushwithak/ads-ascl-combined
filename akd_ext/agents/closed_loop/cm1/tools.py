@@ -13,12 +13,35 @@ from agents import HostedMCPTool
 from akd_ext._types import OpenAITool
 
 
+def _mcp_auth_headers(api_key: str, url: str) -> dict[str, str]:
+    """Auth header for the CM1 MCP server.
+
+    Scheme resolution:
+      1. Explicit ``CM1_MCP_AUTH`` env var (``bearer`` or ``x-api-key``) wins.
+      2. Otherwise auto-detect: FastMCP Cloud (``*.fastmcp.app``) uses a
+         bearer token; the production Temporal server uses ``X-API-Key``.
+    """
+    scheme = os.environ.get("CM1_MCP_AUTH", "").lower()
+    if not scheme:
+        scheme = "bearer" if "fastmcp.app" in url else "x-api-key"
+    if scheme == "bearer":
+        return {"Authorization": f"Bearer {api_key}"}
+    return {"X-API-Key": api_key}
+
+
 def get_default_impl_tools() -> list[OpenAITool]:
     """Default MCP tools for Stage 4A — uses the CM1 Temporal MCP server.
 
     Allowed tools:
       - ``job_submit``: push an experiment batch onto the Temporal workflow queue
       - ``jobs_list``: list previously submitted jobs (useful for dedup / resume checks)
+
+    Configure via environment:
+      - ``CM1_MCP_URL``      — server URL (default: production Temporal server).
+        Point this at a mock endpoint to get an instant job_id + workspace_name
+        without waiting for a real ~2-hour experiment run.
+      - ``CM1_MCP_API_KEY``  — credential (required; tool is skipped if unset).
+      - ``CM1_MCP_AUTH``     — ``x-api-key`` (default) or ``bearer``.
     """
     api_key = os.environ.get("CM1_MCP_API_KEY")
     if not api_key:
@@ -33,7 +56,7 @@ def get_default_impl_tools() -> list[OpenAITool]:
                 "require_approval": "never",
                 "server_description": "CM1 Temporal workflow MCP server — submit jobs and list job history.",
                 "server_url": url,
-                "headers": {"X-API-Key": api_key},
+                "headers": _mcp_auth_headers(api_key, url),
             }
         ),
     ]

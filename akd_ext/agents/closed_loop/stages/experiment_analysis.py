@@ -206,7 +206,7 @@ async def _categorize_and_fetch(
         for url, result in zip(to_fetch, results):
             if isinstance(result, _BinaryContent):
                 # Content-Type says binary (image/pdf) — route to the analyzer.
-                logger.info(f"[Stage5] {url} is binary ({result}) — routing to image analyzer")
+                logger.debug(f"[Stage5] {url} is binary ({result}) — routing to image analyzer")
                 image_urls.append(url)
             elif isinstance(result, Exception):
                 if _classify_url(url) == "unknown":
@@ -216,7 +216,7 @@ async def _categorize_and_fetch(
                     logger.warning(f"[Stage5] failed to fetch {url}: {result}")
                     text_parts.append(f"*Could not fetch `{url}`: {result}*")
             else:
-                logger.info(f"[Stage5] fetched content from {url} ({len(result)} chars)")
+                logger.debug(f"[Stage5] fetched content from {url} ({len(result)} chars)")
                 text_parts.append(result)
 
     text_context = ""
@@ -277,6 +277,14 @@ class ExperimentAnalysisInputSchema(InputSchema):
     skip_status_check: bool = Field(
         default=False,
         description="Skip job_status check and go straight to job_plot.",
+    )
+    message: str = Field(
+        default="",
+        description=(
+            "The user's chat turn, for interactive Stage-5 orchestrators. "
+            "Routes the lifecycle (design / approve / check status / analyze). "
+            "The non-interactive base agent ignores it."
+        ),
     )
 
 
@@ -501,14 +509,14 @@ class ExperimentAnalysisAgent(
             logger.warning(f"[Stage5] job_status failed: {exc!r}")
             return TextOutput(content=f"Could not reach MCP server for `{job_id}`: {exc}")
 
-        logger.info(f"[Stage5] job_status payload keys: {list(payload.keys())}")
+        logger.debug(f"[Stage5] job_status payload keys: {list(payload.keys())}")
         status = self._extract_status(payload)
         if status in _FAILED:
             return TextOutput(content=f"Job `{job_id}` failed (status=`{status}`). No analysis.")
         if status not in _COMPLETE:
             return TextOutput(
                 content=(
-                    f"⏳ Job `{job_id}` is still running (status=`{status}`). "
+                    f"Job `{job_id}` is still running (status=`{status}`). "
                     "Figure analysis has NOT started — it will only begin once the "
                     "job is complete. Ask me to check again in a bit."
                 )
@@ -569,7 +577,7 @@ class ExperimentAnalysisAgent(
         n_total = len(self._flatten(plot_urls))
         if not n_total:
             return TextOutput(content=f"Job `{job_id}` is complete but `job_plot` returned no figures or data.")
-        logger.info(f"[Stage5] job_id={job_id} workspace={workspace!r} urls={n_total} groups={list(plot_urls.keys())}")
+        logger.debug(f"[Stage5] job_id={job_id} workspace={workspace!r} urls={n_total} groups={list(plot_urls.keys())}")
         return plot_urls
 
     # -- Output builders (shared by _arun and _astream) ----------------
@@ -621,7 +629,7 @@ class ExperimentAnalysisAgent(
     ) -> ExperimentAnalysisOutputSchema | TextOutput:
         if params.skip_status_check:
             payload: dict[str, Any] = {}
-            logger.info(f"[Stage5] Skipping status check for {params.job_id}")
+            logger.debug(f"[Stage5] Skipping status check for {params.job_id}")
         else:
             payload = await self._check_job(params.job_id)
             if isinstance(payload, TextOutput):
@@ -640,7 +648,7 @@ class ExperimentAnalysisAgent(
 
         # Separate images from text content (CSV, markdown, etc.)
         image_urls, fetched_text = await _categorize_and_fetch(all_urls)
-        logger.info(
+        logger.debug(
             f"[Stage5] {len(image_urls)} image URLs, "
             f"{len(fetched_text)} chars of fetched text content"
         )
@@ -676,7 +684,7 @@ class ExperimentAnalysisAgent(
         # 1. job_status
         if params.skip_status_check:
             payload: dict[str, Any] = {}
-            logger.info(f"[Stage5] Skipping status check for {params.job_id}")
+            logger.debug(f"[Stage5] Skipping status check for {params.job_id}")
             yield RunningEvent(source=cn, message="Skipping status check…", run_context=run_context)
         else:
             yield RunningEvent(source=cn, message="Checking job status…", run_context=run_context)
