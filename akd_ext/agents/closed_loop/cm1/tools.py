@@ -30,31 +30,36 @@ def _mcp_auth_headers(api_key: str, url: str) -> dict[str, str]:
 
 
 def get_default_impl_tools() -> list[OpenAITool]:
-    """Default MCP tools for Stage 4A — uses the CM1 Temporal MCP server.
+    """Default MCP tools for Stage 4A — uses the CM1 job-management MCP server.
 
     Allowed tools:
-      - ``job_submit``: push an experiment batch onto the Temporal workflow queue
+      - ``job_submit``: submit an experiment batch to the job-management server
       - ``jobs_list``: list previously submitted jobs (useful for dedup / resume checks)
 
-    Configure via environment:
-      - ``CM1_MCP_URL``      — server URL (default: production Temporal server).
+    Configure via environment (BOTH ``CM1_MCP_URL`` and ``CM1_MCP_API_KEY`` are
+    required; if either is missing the tool is skipped so the agent fails loudly
+    with "no job tool" instead of silently falling back to a default endpoint
+    that may be down):
+      - ``CM1_MCP_URL``      — server URL (a FastMCP mock or the production server).
         Point this at a mock endpoint to get an instant job_id + workspace_name
         without waiting for a real ~2-hour experiment run.
-      - ``CM1_MCP_API_KEY``  — credential (required; tool is skipped if unset).
-      - ``CM1_MCP_AUTH``     — ``x-api-key`` (default) or ``bearer``.
+      - ``CM1_MCP_API_KEY``  — credential.
+      - ``CM1_MCP_AUTH``     — ``bearer`` or ``x-api-key`` (auto-detected from the
+        URL if unset: ``*.fastmcp.app`` → bearer, otherwise x-api-key).
     """
     api_key = os.environ.get("CM1_MCP_API_KEY")
-    if not api_key:
-        return []  # No API key configured — Phase 2 will be skipped
-    url = os.environ.get("CM1_MCP_URL", "https://fm.prism.nasa-impact.net/akd/cm1-mcp")
+    url = os.environ.get("CM1_MCP_URL")
+    if not api_key or not url:
+        # Not configured (no silent default) — Stage 4 job submission is skipped.
+        return []
     return [
         HostedMCPTool(
             tool_config={
                 "type": "mcp",
-                "server_label": "CM1_Temporal_MCP_Server",
+                "server_label": "CM1_Job_Management_Server",
                 "allowed_tools": ["job_submit", "jobs_list"],
                 "require_approval": "never",
-                "server_description": "CM1 Temporal workflow MCP server — submit jobs and list job history.",
+                "server_description": "CM1 job-management MCP server — submit experiment batches and list job history.",
                 "server_url": url,
                 "headers": _mcp_auth_headers(api_key, url),
             }
