@@ -240,6 +240,13 @@ class CM1ExperimentAnalysisConfig(ExperimentAnalysisConfig):
     """CM1-specific configuration for the Experiment Analysis Agent."""
 
     system_prompt: str = Field(default=DATA_ANALYSIS_SYSTEM_PROMPT)
+    # gpt-5.2 (reasoning) instead of the nano default so the conversational
+    # turns are higher quality AND surface a live "thinking" trace. summary
+    # "detailed" is required — "auto" skips the summary for short reasoning,
+    # which left the chat looking frozen/dead while the model worked.
+    model_name: str = Field(default="gpt-5.2")
+    reasoning_effort: Literal["low", "medium", "high"] | None = Field(default="low")
+    reasoning_summary: Literal["auto", "detailed", "concise"] | None = Field(default="detailed")
     description: str = Field(
         default="Experiment Analysis Agent for CM1 experiments. A conversational "
         "orchestrator covering the full post-experiment analysis lifecycle: it "
@@ -793,6 +800,11 @@ class CM1ExperimentAnalysisAgent(ExperimentAnalysisAgent):
         if (params.message or "").strip():
             return params.message.strip()
 
+        # LangGraph/UI driver delivers the reply as 'query' (inputs.<node>.query
+        # on resume) instead of 'message'. Treat it as the same chat turn.
+        if (getattr(params, "query", None) or "").strip():
+            return params.query.strip()
+
         hr = getattr(run_context, "human_response", None)
         content = getattr(hr, "content", None)
         if content:
@@ -860,6 +872,11 @@ class CM1ExperimentAnalysisAgent(ExperimentAnalysisAgent):
         **kwargs: Any,
     ) -> AsyncIterator[StreamEvent]:
         cn = self.__class__.__name__
+        # Immediate feedback so the chat doesn't look dead while we route. The
+        # intent-classification LLM call below takes a beat before the
+        # phase-specific "Designing…/Checking…/Analyzing…" line appears, so emit
+        # a generic progress line the instant the turn arrives.
+        yield RunningEvent(source=cn, message="Thinking…", run_context=run_context)
         # Resolve the user's turn from run_context (LangGraph) or message
         # (notebook), then make it visible to the downstream helpers.
         params = params.model_copy(update={"message": self._resolve_turn(params, run_context)})

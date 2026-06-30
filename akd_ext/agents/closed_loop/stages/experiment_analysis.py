@@ -286,6 +286,14 @@ class ExperimentAnalysisInputSchema(InputSchema):
             "The non-interactive base agent ignores it."
         ),
     )
+    query: str | None = Field(
+        default=None,
+        description=(
+            "Alias for the user's chat turn under the LangGraph/UI driver, "
+            "which delivers the reply as 'query' (inputs.<node>.query on resume) "
+            "rather than 'message'. Resolved alongside 'message'."
+        ),
+    )
 
 
 class ExperimentAnalysisOutputSchema(OutputSchema):

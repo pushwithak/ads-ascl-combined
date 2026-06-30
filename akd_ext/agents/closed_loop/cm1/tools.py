@@ -68,7 +68,26 @@ def get_default_impl_tools() -> list[OpenAITool]:
 
 
 def get_default_report_tools() -> list[OpenAITool]:
-    """Default tools for the Research Report Generator. Uses job management MCP server."""
+    """Default tools for the Research Report Generator. Uses job management MCP server.
+
+    Auth is passed via ``headers`` (a real header dict), NOT a top-level
+    ``authorization`` field: the OpenAI hosted-MCP tool_config only honors
+    ``headers``. Sending ``authorization`` was silently ignored, so OpenAI
+    connected to the (bearer-protected) FastMCP server with no credential, got
+    a 401, and the Responses streaming call failed with a generic 500
+    ("An error occurred while processing your request"). This mirrors
+    ``get_default_impl_tools`` (which already worked).
+    """
+    # Prefer the dedicated status endpoint, but fall back to the CM1 job
+    # server (same job_submit/job_status/job_plot contract) when it isn't
+    # configured separately — newer deployments route everything through
+    # CM1_MCP_* and don't set EXPERIMENT_STATUS_MCP_*.
+    api_key = os.environ.get("EXPERIMENT_STATUS_MCP_KEY") or os.environ.get("CM1_MCP_API_KEY")
+    url = os.environ.get("EXPERIMENT_STATUS_MCP_URL") or os.environ.get("CM1_MCP_URL")
+    if not api_key or not url:
+        # Not configured — skip the tool rather than emit one with no/blank auth
+        # that 500s the model call.
+        return []
     return [
         HostedMCPTool(
             tool_config={
@@ -80,11 +99,8 @@ def get_default_report_tools() -> list[OpenAITool]:
                 ],
                 "require_approval": "never",
                 "server_description": "MCP server for checking CM1 experiment job status and fetching result figures",
-                "server_url": os.environ.get(
-                    "EXPERIMENT_STATUS_MCP_URL",
-                    "",  # No default — must be configured
-                ),
-                "authorization": os.environ.get("EXPERIMENT_STATUS_MCP_KEY"),
+                "server_url": url,
+                "headers": _mcp_auth_headers(api_key, url),
             }
         ),
     ]
