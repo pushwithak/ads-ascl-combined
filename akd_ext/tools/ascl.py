@@ -204,11 +204,13 @@ def _parse_entry(doc: dict) -> ASCLEntry:
 
     used_in = _parse_php_array(doc.get("used_in", ""))
 
+    # `x or default` (not `.get(x, default)`) so an explicit null from ASCL maps
+    # to the schema default instead of failing validation on a non-nullable field.
     return ASCLEntry(
-        ascl_id=doc.get("ascl_id", ""),
-        title=doc.get("title", ""),
-        credit=doc.get("credit", ""),
-        abstract=doc.get("abstract", ""),
+        ascl_id=doc.get("ascl_id") or "",
+        title=doc.get("title") or "",
+        credit=doc.get("credit") or "",
+        abstract=doc.get("abstract") or "",
         site_list=_parse_php_array(doc.get("site_list", "")),
         bibcode=doc.get("bibcode") or None,
         described_in=_parse_php_array(doc.get("described_in", "")),

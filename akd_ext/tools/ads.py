@@ -177,8 +177,9 @@ class ADSSearchTool(BaseTool[ADSSearchToolInputSchema, ADSSearchToolOutputSchema
                 response.raise_for_status()
                 data = response.json()
             # Parse inside the try so a malformed-but-200 body is reported via
-            # `error` rather than raising out of the tool.
-            response_data = data.get("response", {})
+            # `error` rather than raising out of the tool. `x or {}` also guards
+            # against an explicit {"response": null}, which .get(k, {}) would not.
+            response_data = data.get("response") or {}
             docs: list[dict] = response_data.get("docs", [])
             papers = [_parse_paper(doc) for doc in docs if isinstance(doc, dict)]
             num_found = response_data.get("numFound", 0)
