@@ -176,16 +176,16 @@ class ADSSearchTool(BaseTool[ADSSearchToolInputSchema, ADSSearchToolOutputSchema
                 response = await client.get(url, params=query_params, headers=headers)
                 response.raise_for_status()
                 data = response.json()
+            # Parse inside the try so a malformed-but-200 body is reported via
+            # `error` rather than raising out of the tool.
+            response_data = data.get("response", {})
+            docs: list[dict] = response_data.get("docs", [])
+            papers = [_parse_paper(doc) for doc in docs if isinstance(doc, dict)]
+            num_found = response_data.get("numFound", 0)
         except Exception as e:
             return ADSSearchToolOutputSchema(error=f"ADS query failed: {e}")
 
-        response_data = data.get("response", {})
-        docs: list[dict] = response_data.get("docs", [])
-
-        return ADSSearchToolOutputSchema(
-            papers=[_parse_paper(doc) for doc in docs],
-            num_found=response_data.get("numFound", 0),
-        )
+        return ADSSearchToolOutputSchema(papers=papers, num_found=num_found)
 
 
 def _parse_paper(doc: dict) -> ADSPaper:
@@ -194,22 +194,24 @@ def _parse_paper(doc: dict) -> ADSPaper:
     ADS returns `title` and `doi` as single-element lists, so we unwrap them.
     Everything else maps directly.
     """
+    # `x or default` (not `.get(x, default)`) so an explicit null from ADS maps
+    # to the schema default instead of failing validation on a non-nullable field.
     title_list = doc.get("title") or []
     doi_list = doc.get("doi") or []
     return ADSPaper(
-        bibcode=doc.get("bibcode", ""),
+        bibcode=doc.get("bibcode") or "",
         title=title_list[0] if title_list else "",
-        first_author=doc.get("first_author", ""),
-        authors=doc.get("author", []),
-        abstract=doc.get("abstract", ""),
+        first_author=doc.get("first_author") or "",
+        authors=doc.get("author") or [],
+        abstract=doc.get("abstract") or "",
         year=doc.get("year"),
         pubdate=doc.get("pubdate"),
-        citation_count=doc.get("citation_count", 0),
+        citation_count=doc.get("citation_count") or 0,
         doi=doi_list[0] if doi_list else None,
         pub=doc.get("pub"),
-        data=doc.get("data", []),
-        esources=doc.get("esources", []),
-        property=doc.get("property", []),
+        data=doc.get("data") or [],
+        esources=doc.get("esources") or [],
+        property=doc.get("property") or [],
     )
 
 
@@ -287,14 +289,16 @@ class ADSLinksResolverTool(BaseTool[ADSLinksResolverInputSchema, ADSLinksResolve
                 response = await client.get(url, headers=headers)
                 response.raise_for_status()
                 data = response.json()
+            # `x or {}` guards against an explicit null (e.g. {"links": null}),
+            # which .get(k, {}) would not; parse inside the try so any shape
+            # surprise is reported via `error` instead of raising.
+            records = (data.get("links") or {}).get("records") or []
+            bibcodes = [r["bibcode"] for r in records if isinstance(r, dict) and r.get("bibcode")]
         except Exception as e:
             return ADSLinksResolverOutputSchema(
                 bibcode=params.bibcode,
                 error=f"ADS resolver failed: {e}",
             )
-
-        records = data.get("links", {}).get("records", [])
-        bibcodes = [r["bibcode"] for r in records if r.get("bibcode")]
 
         return ADSLinksResolverOutputSchema(
             bibcode=params.bibcode,

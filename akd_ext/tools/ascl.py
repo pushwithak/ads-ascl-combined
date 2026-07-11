@@ -160,7 +160,10 @@ class ASCLSearchTool(BaseTool[ASCLSearchToolInputSchema, ASCLSearchToolOutputSch
         if _ASCL_ID_RE.fullmatch(normalized):
             q = f'ascl_id:"{normalized}"'
         else:
-            q = f'"{params.query}"'
+            # Strip embedded double quotes so they can't unbalance the wrapping
+            # quotes and produce a malformed query.
+            safe_query = params.query.replace('"', "")
+            q = f'"{safe_query}"'
 
         query_params = {"q": q}
 
@@ -169,21 +172,20 @@ class ASCLSearchTool(BaseTool[ASCLSearchToolInputSchema, ASCLSearchToolOutputSch
                 response = await client.get(self.config.base_url, params=query_params)
                 response.raise_for_status()
                 data = response.json()
+            # The API returns a JSON array of entries. If we ever get something
+            # else back, surface it as an error rather than silently producing []
+            # entries. Parse inside the try so a bad element is reported via
+            # `error`; skip non-dict elements defensively.
+            if not isinstance(data, list):
+                return ASCLSearchToolOutputSchema(
+                    error=f"Unexpected ASCL response type: {type(data).__name__}",
+                )
+            entries = [_parse_entry(doc) for doc in data[: params.rows] if isinstance(doc, dict)]
+            num_found = len(data)
         except Exception as e:
             return ASCLSearchToolOutputSchema(error=f"ASCL query failed: {e}")
 
-        # The API returns a JSON array of entries. If we ever get something
-        # else back, surface it as an error rather than silently producing []
-        # entries.
-        if not isinstance(data, list):
-            return ASCLSearchToolOutputSchema(
-                error=f"Unexpected ASCL response type: {type(data).__name__}",
-            )
-
-        return ASCLSearchToolOutputSchema(
-            entries=[_parse_entry(doc) for doc in data[: params.rows]],
-            num_found=len(data),
-        )
+        return ASCLSearchToolOutputSchema(entries=entries, num_found=num_found)
 
 
 def _parse_entry(doc: dict) -> ASCLEntry:
