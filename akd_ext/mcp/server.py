@@ -1,6 +1,7 @@
 """FastMCP Server for akd-ext tools."""
 
 from fastmcp import FastMCP
+from loguru import logger
 
 from akd_ext.mcp.registry import MCPToolRegistry
 from akd_ext.mcp.converter import tool_converter, register_mcp_tool
@@ -28,11 +29,17 @@ def register_all_tools():
     tool_classes = MCPToolRegistry().get_tools()
 
     for tool_class in tool_classes:
-        tool = tool_class()
-        # Convert tool to FastMCP compatible function
-        mcp_func = tool_converter(tool)
-        # Register tool with FastMCP server
-        register_mcp_tool(mcp_func, mcp)
+        # Isolate each tool: a construction failure (e.g. a required env var
+        # missing for one tool's config) must not abort registration of the
+        # others, which would take the whole server down.
+        try:
+            tool = tool_class()
+            # Convert tool to FastMCP compatible function
+            mcp_func = tool_converter(tool)
+            # Register tool with FastMCP server
+            register_mcp_tool(mcp_func, mcp)
+        except Exception as e:
+            logger.warning(f"Skipping tool {tool_class.__name__}: failed to register ({e})")
 
 
 def register_tools_manually(tools: list[type[BaseTool]]) -> None:
