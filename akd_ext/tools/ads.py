@@ -15,15 +15,16 @@ Dev API:  https://github.com/adsabs/adsabs-dev-api
 from __future__ import annotations
 
 import os
+from typing import Any
 from urllib.parse import quote
 
-import httpx
-from pydantic import Field, model_validator
+from pydantic import Field
 
 from akd._base import InputSchema, OutputSchema
 from akd.tools import BaseTool, BaseToolConfig
 
 from akd_ext.mcp import mcp_tool
+from ._http import get_json
 
 
 # Fields requested from ADS. This fixed set covers the common needs for
@@ -34,6 +35,14 @@ from akd_ext.mcp import mcp_tool
 _ADS_FIELDS = (
     "bibcode,title,first_author,author,abstract,year,pubdate,"
     "citation_count,doi,pub,data,esources,property"
+)
+
+# ADS requires a bearer token. Missing-token is reported per call (see each
+# tool's `_arun`) rather than raised at config construction — the MCP server
+# instantiates every tool at import time, so a raising validator here would
+# take down the whole server when ADS_API_TOKEN is unset.
+_NO_TOKEN_ERROR = (
+    "ADS_API_TOKEN is not set. Get a token from https://ui.adsabs.harvard.edu/user/settings/token"
 )
 
 
@@ -64,17 +73,6 @@ class ADSToolConfig(BaseToolConfig):
         default=30.0,
         description="HTTP request timeout in seconds.",
     )
-
-    @model_validator(mode="after")
-    def _require_api_token(self) -> "ADSToolConfig":
-        # ADS requires authentication. Fail fast at config creation if no token
-        # is available, rather than surfacing a 401 at query time.
-        if not self.api_token:
-            raise ValueError(
-                "ADS_API_TOKEN environment variable is not set. "
-                "Get a token from https://ui.adsabs.harvard.edu/user/settings/token"
-            )
-        return self
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +159,8 @@ class ADSSearchTool(BaseTool[ADSSearchToolInputSchema, ADSSearchToolOutputSchema
     config: ADSToolConfig
 
     async def _arun(self, params: ADSSearchToolInputSchema) -> ADSSearchToolOutputSchema:
+        if not self.config.api_token:
+            return ADSSearchToolOutputSchema(error=_NO_TOKEN_ERROR)
         url = f"{self.config.base_url.rstrip('/')}/search/query"
         headers = {"Authorization": f"Bearer {self.config.api_token}"}
         query_params: dict[str, str] = {
@@ -172,10 +172,7 @@ class ADSSearchTool(BaseTool[ADSSearchToolInputSchema, ADSSearchToolOutputSchema
             query_params["fq"] = params.fq
 
         try:
-            async with httpx.AsyncClient(timeout=self.config.timeout) as client:
-                response = await client.get(url, params=query_params, headers=headers)
-                response.raise_for_status()
-                data = response.json()
+            data = await get_json(url, headers=headers, params=query_params, timeout=self.config.timeout)
             # Parse inside the try so a malformed-but-200 body is reported via
             # `error` rather than raising out of the tool. `x or {}` also guards
             # against an explicit {"response": null}, which .get(k, {}) would not.
@@ -189,26 +186,33 @@ class ADSSearchTool(BaseTool[ADSSearchToolInputSchema, ADSSearchToolOutputSchema
         return ADSSearchToolOutputSchema(papers=papers, num_found=num_found)
 
 
-def _parse_paper(doc: dict) -> ADSPaper:
-    """Turn one ADS response document into an ADSPaper.
+def _first_str(value: Any) -> str:
+    """Unwrap an ADS field that is usually a single-element list.
 
-    ADS returns `title` and `doi` as single-element lists, so we unwrap them.
-    Everything else maps directly.
+    ADS normally returns `title`/`doi` as `["..."]`, but a bare scalar string
+    can appear with API/version variance or a proxied response. Return the
+    string either way, and "" for anything else — never index into a bare
+    string (which would silently yield its first character).
     """
+    if isinstance(value, list):
+        return value[0] if value and isinstance(value[0], str) else ""
+    return value if isinstance(value, str) else ""
+
+
+def _parse_paper(doc: dict) -> ADSPaper:
+    """Turn one ADS response document into an ADSPaper."""
     # `x or default` (not `.get(x, default)`) so an explicit null from ADS maps
     # to the schema default instead of failing validation on a non-nullable field.
-    title_list = doc.get("title") or []
-    doi_list = doc.get("doi") or []
     return ADSPaper(
         bibcode=doc.get("bibcode") or "",
-        title=title_list[0] if title_list else "",
+        title=_first_str(doc.get("title")),
         first_author=doc.get("first_author") or "",
         authors=doc.get("author") or [],
         abstract=doc.get("abstract") or "",
         year=doc.get("year"),
         pubdate=doc.get("pubdate"),
         citation_count=doc.get("citation_count") or 0,
-        doi=doi_list[0] if doi_list else None,
+        doi=_first_str(doc.get("doi")) or None,
         pub=doc.get("pub"),
         data=doc.get("data") or [],
         esources=doc.get("esources") or [],
@@ -278,6 +282,8 @@ class ADSLinksResolverTool(BaseTool[ADSLinksResolverInputSchema, ADSLinksResolve
     config: ADSToolConfig
 
     async def _arun(self, params: ADSLinksResolverInputSchema) -> ADSLinksResolverOutputSchema:
+        if not self.config.api_token:
+            return ADSLinksResolverOutputSchema(bibcode=params.bibcode, error=_NO_TOKEN_ERROR)
         # Bibcodes can contain characters that must be percent-encoded in
         # the URL path (e.g. '&' in '2005Ap&SS.298..341W'). Pass `safe=""`
         # to quote() so nothing is left unescaped.
@@ -286,10 +292,7 @@ class ADSLinksResolverTool(BaseTool[ADSLinksResolverInputSchema, ADSLinksResolve
         headers = {"Authorization": f"Bearer {self.config.api_token}"}
 
         try:
-            async with httpx.AsyncClient(timeout=self.config.timeout) as client:
-                response = await client.get(url, headers=headers)
-                response.raise_for_status()
-                data = response.json()
+            data = await get_json(url, headers=headers, timeout=self.config.timeout)
             # `x or {}` guards against an explicit null (e.g. {"links": null}),
             # which .get(k, {}) would not; parse inside the try so any shape
             # surprise is reported via `error` instead of raising.
