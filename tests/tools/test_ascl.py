@@ -92,13 +92,15 @@ async def test_ascl_described_in_returns_ads_urls():
 
 
 @pytest.mark.asyncio
-async def test_ascl_used_in_count_matches_list_length():
-    """used_in_count should equal len(used_in)."""
+async def test_ascl_used_in_count_is_derived_and_serialized():
+    """used_in_count is a computed field derived from used_in: it equals
+    len(used_in) and is still present in the serialized output."""
     tool = ASCLSearchTool()
     result = await tool.arun(ASCLSearchToolInputSchema(query="RADMC-3D", rows=3))
 
     for entry in result.entries:
         assert entry.used_in_count == len(entry.used_in)
+        assert entry.model_dump()["used_in_count"] == len(entry.used_in)
 
 
 @pytest.mark.asyncio
@@ -163,3 +165,104 @@ async def test_ascl_search_by_nonexistent_id():
 
     assert result.error is None
     assert result.entries == []
+
+
+# ---------------------------------------------------------------------------
+# Multi-word (AND) free-text search
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ascl_search_is_word_order_independent():
+    """Multi-word free text is ANDed order-independently: reordering the words
+    yields the same match count. This is the behavior the client-side
+    intersection adds on top of ASCL's exact-phrase-only matching.
+    """
+    tool = ASCLSearchTool()
+    forward = await tool.arun(ASCLSearchToolInputSchema(query="radiative transfer", rows=10))
+    reverse = await tool.arun(ASCLSearchToolInputSchema(query="transfer radiative", rows=10))
+
+    assert forward.error is None and reverse.error is None
+    assert forward.num_found > 0
+    assert forward.num_found == reverse.num_found
+
+
+@pytest.mark.asyncio
+async def test_ascl_free_text_ignores_leading_ascl_prefix():
+    """A capability query accidentally prefixed with 'ascl:' still matches:
+    the prefix is stripped rather than becoming a required AND term that would
+    zero out the results."""
+    tool = ASCLSearchTool()
+    result = await tool.arun(ASCLSearchToolInputSchema(query="ascl: RADMC", rows=5))
+
+    assert result.error is None
+    assert "1202.015" in {e.ascl_id for e in result.entries}
+
+
+# ---------------------------------------------------------------------------
+# Empty / whitespace queries
+# ---------------------------------------------------------------------------
+
+
+def test_ascl_empty_query_rejected_by_schema():
+    """An empty query is rejected at validation time (min_length=1)."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        ASCLSearchToolInputSchema(query="")
+
+
+@pytest.mark.asyncio
+async def test_ascl_whitespace_query_returns_empty():
+    """A whitespace-only query has no search terms, so it returns no matches
+    (and makes no API call) rather than raising."""
+    tool = ASCLSearchTool()
+    result = await tool.arun(ASCLSearchToolInputSchema(query="   "))
+
+    assert result.error is None
+    assert result.entries == []
+    assert result.num_found == 0
+
+
+# ---------------------------------------------------------------------------
+# Offline unit tests (no network) for id normalization and AND intersection
+# ---------------------------------------------------------------------------
+
+from akd_ext.tools.ascl import _intersect_by_id, _normalize_ascl_id, _quote_term  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("1303.002", "1303.002"),
+        ("ascl:1303.002", "1303.002"),
+        ("ASCL:1303.002", "1303.002"),
+        ("ascl: 1303.002", "1303.002"),
+        ("ascl:ascl:1303.002", "1303.002"),
+        ("https://ascl.net/1303.002", "1303.002"),
+        ("  ascl:1303.002  ", "1303.002"),
+    ],
+)
+def test_normalize_ascl_id(raw, expected):
+    assert _normalize_ascl_id(raw) == expected
+
+
+def test_quote_term_wraps_and_drops_embedded_quotes():
+    assert _quote_term("radiative") == '"radiative"'
+    assert _quote_term('rad"iative') == '"radiative"'
+
+
+def test_intersect_by_id_keeps_only_common_records_in_first_term_order():
+    term_a = [{"ascl_id": "1"}, {"ascl_id": "2"}, {"ascl_id": "3"}]
+    term_b = [{"ascl_id": "3"}, {"ascl_id": "1"}]
+    result = _intersect_by_id([term_a, term_b])
+
+    assert [d["ascl_id"] for d in result] == ["1", "3"]
+
+
+def test_intersect_by_id_empty_when_a_term_has_no_matches():
+    assert _intersect_by_id([[{"ascl_id": "1"}], []]) == []
+
+
+def test_intersect_by_id_empty_input():
+    assert _intersect_by_id([]) == []

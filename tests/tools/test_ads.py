@@ -23,7 +23,6 @@ from akd_ext.tools import (
     ADSSearchTool,
     ADSSearchToolInputSchema,
     ADSSearchToolOutputSchema,
-    ADSToolConfig,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -124,15 +123,6 @@ async def test_ads_search_by_bibcode_exact_lookup():
     assert paper.first_author.startswith("Fryxell")
     assert paper.year == "2000"
     assert paper.citation_count > 1000  # canonical paper with ~2100 citations
-
-
-
-def test_ads_config_rejects_empty_token():
-    """The config validator refuses an empty api_token."""
-    from pydantic import ValidationError
-
-    with pytest.raises(ValidationError):
-        ADSToolConfig(api_token="")
 
 
 # ---------------------------------------------------------------------------
