@@ -35,6 +35,10 @@ _ASCL_ID_RE = re.compile(r"\d{4}\.\d{3,4}")
 # with this pattern. Verified against live API responses.
 _PHP_STRING_RE = re.compile(r's:\d+:"([^"]*)"')
 
+# Deployment-only hard cap on how many entries a single search returns. A larger
+# `rows` request is silently clamped to this — the tool never returns more.
+_RESULT_CAP = 5
+
 
 def _parse_php_array(php_str: str) -> list[str]:
     """Pull string entries out of a PHP-serialized array.
@@ -161,12 +165,13 @@ class ASCLSearchToolInputSchema(InputSchema):
         ),
     )
     rows: int = Field(
-        default=10,
+        default=_RESULT_CAP,
         ge=1,
         le=50,
         description=(
             "Max entries to return. Enforced client-side — the ASCL API "
-            "itself does not accept a row limit."
+            f"itself does not accept a row limit. Hard-capped at {_RESULT_CAP} "
+            "in this deployment."
         ),
     )
 
@@ -241,7 +246,9 @@ class ASCLSearchTool(BaseTool[ASCLSearchToolInputSchema, ASCLSearchToolOutputSch
                         *(self._ascl_search(client, _quote_term(term)) for term in terms)
                     )
                     docs = _intersect_by_id(per_term)
-            entries = [_parse_entry(doc) for doc in docs[: params.rows]]
+            # Silently clamp to the deployment cap; num_found still reports the
+            # full pre-cap match count.
+            entries = [_parse_entry(doc) for doc in docs[: min(params.rows, _RESULT_CAP)]]
             num_found = len(docs)
         except Exception as e:
             return ASCLSearchToolOutputSchema(error=f"ASCL query failed: {e}")

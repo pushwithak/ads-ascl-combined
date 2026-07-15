@@ -50,14 +50,15 @@ async def test_ads_search_by_title():
 
 
 @pytest.mark.asyncio
-async def test_ads_search_honors_rows():
-    """When enough matches exist, we should get exactly `rows` papers."""
+async def test_ads_search_rows_hard_capped():
+    """This deployment hard-caps results at 5: even requesting 15 returns <= 5."""
     tool = ADSSearchTool()
     result = await tool.arun(ADSSearchToolInputSchema(query="dark energy", rows=15))
 
     assert result.error is None
-    if result.num_found >= 15:
-        assert len(result.papers) == 15
+    # "dark energy" has thousands of matches, so the cap — not availability — bounds this.
+    assert result.num_found > 5
+    assert len(result.papers) <= 5
 
 
 @pytest.mark.asyncio

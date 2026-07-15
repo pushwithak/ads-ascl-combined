@@ -45,6 +45,10 @@ _NO_TOKEN_ERROR = (
     "ADS_API_TOKEN is not set. Get a token from https://ui.adsabs.harvard.edu/user/settings/token"
 )
 
+# Deployment-only hard cap on how many papers a single search returns. A larger
+# `rows` request is silently clamped to this — the tool never returns more.
+_RESULT_CAP = 5
+
 
 # ---------------------------------------------------------------------------
 # Shared config
@@ -119,10 +123,10 @@ class ADSSearchToolInputSchema(InputSchema):
         ),
     )
     rows: int = Field(
-        default=10,
+        default=_RESULT_CAP,
         ge=1,
         le=50,
-        description="Max number of papers to return.",
+        description=f"Max number of papers to return. Hard-capped at {_RESULT_CAP} in this deployment.",
     )
     fq: str | None = Field(
         default=None,
@@ -166,7 +170,8 @@ class ADSSearchTool(BaseTool[ADSSearchToolInputSchema, ADSSearchToolOutputSchema
         query_params: dict[str, str] = {
             "q": params.query,
             "fl": _ADS_FIELDS,
-            "rows": str(params.rows),
+            # Silently clamp to the deployment cap so a larger request never over-fetches.
+            "rows": str(min(params.rows, _RESULT_CAP)),
         }
         if params.fq:
             query_params["fq"] = params.fq
